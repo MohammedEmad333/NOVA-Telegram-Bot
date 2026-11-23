@@ -2,6 +2,8 @@
 
 A private, self-hosted Telegram media downloader inspired by [NOVADownloader](https://github.com/MohammedEmad333/NOVADownloader). **Early MVP, not production-verified.**
 
+Official Telegram bot: **[@NovaOrbitDLBot](https://t.me/NovaOrbitDLBot)**. This identity is separate from the backend service; the Telegram API token stays only in the private server environment.
+
 ## Initial features
 
 - Telegram long polling. No incoming ports, public domain or webhook needed.
