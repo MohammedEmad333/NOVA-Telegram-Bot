@@ -11,7 +11,7 @@ Official Telegram bot: **[@NovaOrbitDLBot](https://t.me/NovaOrbitDLBot)**. This 
 - Public HTTPS links from YouTube, SoundCloud and X/Twitter via `yt-dlp`; actual site support depends on upstream availability.
 - Up to 720p where available, one active download/upload at a time, 45 MiB final file limit. Larger videos are rejected.
 - Temporary download files are deleted after each task. No user-provided cookies, account logins, DRM bypass or arbitrary-domain fetching.
-- Non-root Docker service, read-only filesystem, 768 MiB RAM / 1 vCPU, 2 GiB ephemeral download storage, bounded logs.
+- Non-root Docker service, read-only filesystem, 768 MiB RAM / 1 vCPU, 256 MiB ephemeral download storage, bounded logs.
 - Unit tests, CI, and no tokens stored in Git.
 
 **Scope:** Direct MP4 from arbitrary sites, MEGA, Witanime, playlists, quality selection and Telegram Local Bot API are **not yet implemented**. The initial bot does **not** expose the whole Android NOVA feature set. Downloads should be limited to content you have permission to save.
@@ -45,7 +45,7 @@ Stop the bot with `docker compose down`. Updates: `git pull --ff-only && docker 
 
 ## Resource policy
 
-The default standard Telegram Bot API supports uploads up to 50 MB; the MVP caps output at 45 MiB to leave margin. `/downloads` is a 2 GiB **tmpfs** (RAM-backed) mounted into the container, so it competes with available host memory even though container `mem_limit` may not fully account for all charged pages. Review Docker memory and disk behavior under real traffic before raising limits. A single task runs synchronously; new messages wait for the current task, with no durable queue. Requests interrupted by process restart are not resumed.
+The default standard Telegram Bot API supports uploads up to 50 MB; the MVP caps output at 45 MiB to leave margin. `/downloads` is a 256 MiB **tmpfs** (RAM-backed) mounted into the container, so it competes with available host memory even though container `mem_limit` may not fully account for all charged pages. Review Docker memory and disk behavior under real traffic before raising limits. The initial bot only supports private chats and ignores group messages. A single task runs synchronously; new messages wait for the current task, with no durable queue. Requests interrupted by process restart are not resumed.
 
 Do not expect hard guarantees from CPU quota alone. Avoid running heavy transcoding concurrently with production database workloads.
 
