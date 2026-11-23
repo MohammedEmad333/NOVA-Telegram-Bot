@@ -49,6 +49,29 @@ The default standard Telegram Bot API supports uploads up to 50 MB; the MVP caps
 
 Do not expect hard guarantees from CPU quota alone. Avoid running heavy transcoding concurrently with production database workloads.
 
+## Telegram HTTP 429 troubleshooting
+
+If the bot starts but does not answer and logs show HTTP 429 (Too Many Requests),
+stop its polling process: `docker compose stop nova-bot`. Check that another
+instance or another application is not polling with the same token. Do **not**
+repeatedly call `getMe` or `getWebhookInfo` while throttled; wait for Telegram's
+`retry_after` interval (when available). HTTP 429 alone is not evidence that the token
+is wrong. Other likely causes for a silent bot include a webhook configured on
+the same token or a competing polling process (HTTP 409).
+
+After updating the code, the bot respects Telegram's retry delay and applies
+bounded exponential backoff to repeated failures. It logs HTTP status codes,
+not secret bot tokens. To make **one** authenticated diagnostic call after the
+cooldown, with the primary bot stopped, run:
+
+```bash
+docker compose run --rm --no-deps nova-bot python bot.py --check-telegram
+```
+
+This prints the bot username or the numeric HTTP status, and any
+`retry_after` returned by Telegram, without printing the token. It is still
+an API call, so do not loop this command during a rate limit.
+
 ## Validation
 
 ```bash
