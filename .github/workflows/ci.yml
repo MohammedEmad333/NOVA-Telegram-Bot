@@ -21,3 +21,5 @@ jobs:
           cp .env.example .env
           docker compose config --quiet
           rm .env
+      - name: Build container image
+        run: docker build --tag nova-telegram-bot:ci .
