@@ -35,11 +35,22 @@ class SecurityTests(unittest.TestCase):
         with patch.object(bot, "ALLOWED_RAW", "123, 456, invalid"):
             self.assertEqual(bot.allowed_ids(), {123, 456})
 
+    def test_group_chat_is_ignored_even_for_authorized_user(self):
+        with patch.object(bot, "ALLOWED_RAW", "123"), \
+             patch.object(bot, "safe_send") as notify, \
+             patch.object(bot, "download") as download:
+            bot.handle({"message": {"from": {"id": 123},
+                                    "chat": {"id": -100987, "type": "supergroup"},
+                                    "text": "https://youtu.be/test"}})
+            download.assert_not_called()
+            notify.assert_not_called()
+
     def test_unauthorized_user_cannot_download(self):
         with patch.object(bot, "ALLOWED_RAW", "123"), \
              patch.object(bot, "safe_send") as notify, \
              patch.object(bot, "download") as download:
-            bot.handle({"message": {"from": {"id": 999}, "chat": {"id": 999},
+            bot.handle({"message": {"from": {"id": 999},
+                                    "chat": {"id": 999, "type": "private"},
                                     "text": "https://youtu.be/test"}})
             download.assert_not_called()
             notify.assert_called_once()
