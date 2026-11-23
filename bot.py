@@ -2,6 +2,7 @@
 import http.client
 import json
 import logging
+import sys
 import os
 import re
 import shutil
@@ -46,14 +47,65 @@ def extract_url(text):
     return match.group(0).rstrip(".,!?)\"'") if match else None
 
 
+class TelegramApiError(Exception):
+    """Telegram API failure without exposing the token-bearing request URL."""
+
+    def __init__(self, status, retry_after=None):
+        self.status = status
+        self.retry_after = retry_after
+        super().__init__("Telegram API HTTP " + str(status))
+
+
+def retry_after_seconds(headers=None, body=None):
+    """Honor Telegram ResponseParameters.retry_after and Retry-After headers."""
+    values = []
+    header = headers.get("Retry-After") if headers else None
+    try:
+        data = json.loads(body) if body else {}
+        parameter = (data.get("parameters") or {}).get("retry_after")
+    except (ValueError, TypeError, AttributeError):
+        parameter = None
+
+    for raw in (header, parameter):
+        if isinstance(raw, bool):
+            continue
+        try:
+            seconds = int(raw)
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if 0 < seconds <= 604800:
+            values.append(seconds)
+    return max(values, default=None)
+
+
+def polling_delay(status, errors, retry_after=None):
+    """Back off on every failure, with a longer wait for Telegram rate limits."""
+    fallback = min(900, 30 * 2 ** min(max(errors - 1, 0), 5))
+    if status in (401, 403):
+        return max(900, fallback)
+    if status == 409:
+        return max(300, fallback)
+    if status == 429:
+        return max(fallback, (retry_after or 0) + 2)
+    return fallback
+
+
 def api_call(method, params=None, timeout=45):
     payload = json.dumps(params or {}).encode()
     req = Request("https://" + API_HOST + "/bot" + TOKEN + "/" + method,
                   data=payload, headers={"Content-Type": "application/json"})
-    with urlopen(req, timeout=timeout) as response:
-        result = json.load(response)
+    try:
+        with urlopen(req, timeout=timeout) as response:
+            result = json.load(response)
+    except HTTPError as exc:
+        # Never log HTTPError or its URL; both can contain the secret bot token.
+        retry_after = retry_after_seconds(exc.headers, exc.read(16384))
+        raise TelegramApiError(exc.code, retry_after) from None
     if not result.get("ok"):
-        raise RuntimeError("Telegram returned an error for " + method)
+        raise TelegramApiError(
+            result.get("error_code", 0),
+            retry_after_seconds(body=json.dumps(result)),
+        )
     return result.get("result")
 
 
@@ -64,6 +116,8 @@ def message(chat_id, text):
 def safe_send(chat_id, text):
     try:
         message(chat_id, text)
+    except TelegramApiError as exc:
+        LOG.warning("Message failed: Telegram HTTP %d", exc.status)
     except (OSError, RuntimeError, ValueError) as exc:
         LOG.warning("Could not send message: %s", type(exc).__name__)
 
@@ -178,19 +232,49 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     LOG.info("NOVA private bot starting, max video size %s MB", MAX_MB)
     offset = None
+    errors = 0
     while True:
         try:
             updates = api_call("getUpdates", {
                 "offset": offset, "timeout": 25, "limit": 10,
                 "allowed_updates": ["message"],
             }, timeout=35)
+            errors = 0
             for update in updates:
                 offset = update["update_id"] + 1
                 handle(update)
-        except (OSError, RuntimeError, ValueError, HTTPError, URLError) as exc:
-            LOG.warning("Polling error: %s", type(exc).__name__)
-            time.sleep(5)
+        except TelegramApiError as exc:
+            errors += 1
+            delay = polling_delay(exc.status, errors, exc.retry_after)
+            LOG.warning("Telegram polling HTTP %d; next attempt in %d seconds",
+                        exc.status, delay)
+            time.sleep(delay)
+        except (OSError, RuntimeError, ValueError, URLError) as exc:
+            errors += 1
+            delay = polling_delay(None, errors)
+            LOG.warning("Polling network/response failure (%s); next attempt in %d seconds",
+                        type(exc).__name__, delay)
+            time.sleep(delay)
+
+
+def diagnose():
+    """A single private health check; never print or persist the bot token."""
+    try:
+        result = api_call("getMe", timeout=15)
+        print("Telegram getMe: OK")
+        print("Username:", (result or {}).get("username", "unknown"))
+    except TelegramApiError as exc:
+        print("Telegram getMe: HTTP", exc.status)
+        if exc.retry_after is not None:
+            print("Telegram retry_after (seconds):", exc.retry_after)
+        raise SystemExit(1)
+    except (OSError, ValueError) as exc:
+        print("Telegram connection error:", type(exc).__name__)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 2 and sys.argv[1] == "--check-telegram":
+        diagnose()
+    else:
+        main()

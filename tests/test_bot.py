@@ -45,6 +45,36 @@ class SecurityTests(unittest.TestCase):
             download.assert_not_called()
             notify.assert_not_called()
 
+    def test_retry_after_is_parsed_from_json_or_header(self):
+        self.assertEqual(bot.retry_after_seconds(body='{"parameters":{"retry_after":150}}'), 150)
+        self.assertEqual(bot.retry_after_seconds(headers={"Retry-After": "80"}), 80)
+        self.assertEqual(bot.retry_after_seconds(headers={"Retry-After": "80"},
+                         body='{"parameters":{"retry_after":150}}'), 150)
+        self.assertIsNone(bot.retry_after_seconds(body='not json'))
+        self.assertIsNone(bot.retry_after_seconds(body='{"parameters":{"retry_after":-1}}'))
+
+    def test_rate_limit_backoff_respects_wait(self):
+        self.assertEqual(bot.polling_delay(429, 1, 200), 202)
+        self.assertEqual(bot.polling_delay(429, 1), 30)
+        self.assertEqual(bot.polling_delay(429, 2), 60)
+        self.assertEqual(bot.polling_delay(429, 30), 900)
+        self.assertEqual(bot.polling_delay(409, 1), 300)
+        self.assertEqual(bot.polling_delay(401, 1), 900)
+
+    def test_api_call_sanitizes_http_error(self):
+        from io import BytesIO
+        from urllib.error import HTTPError
+        exc = HTTPError("https://api.telegram.org/botsecret/getUpdates", 429,
+                        "Too Many Requests", {"Retry-After": "120"},
+                        BytesIO(b'{"ok":false,"parameters":{"retry_after":130}}'))
+        with patch.object(bot, "TOKEN", "testsecret"), \
+             patch.object(bot, "urlopen", side_effect=exc):
+            with self.assertRaises(bot.TelegramApiError) as error:
+                bot.api_call("getUpdates")
+        self.assertEqual(error.exception.status, 429)
+        self.assertEqual(error.exception.retry_after, 130)
+        self.assertNotIn("testsecret", str(error.exception))
+
     def test_unauthorized_user_cannot_download(self):
         with patch.object(bot, "ALLOWED_RAW", "123"), \
              patch.object(bot, "safe_send") as notify, \
