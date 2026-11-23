@@ -82,7 +82,7 @@ def download(url, folder):
     ]
     try:
         result = subprocess.run(args, cwd=str(folder), stdout=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE, timeout=DOWNLOAD_TIMEOUT,
+                                stderr=subprocess.DEVNULL, timeout=DOWNLOAD_TIMEOUT,
                                 check=False, text=True)
     except subprocess.TimeoutExpired:
         raise ValueError("انتهت مهلة التحميل. جرّب فيديو أقصر.")
@@ -107,7 +107,7 @@ def send_video(chat_id, path):
         'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
         + str(chat_id) + "\r\n"
         "--" + boundary + "\r\n"
-        'Content-Disposition: form-data; name="video"; filename="nova.mp4"\r\n'
+        'Content-Disposition: form-data; name="document"; filename="nova' + path.suffix.lower() + '"\r\n'
         "Content-Type: application/octet-stream\r\n\r\n"
     ).encode()
     tail = ("\r\n--" + boundary + "--\r\n").encode()
@@ -133,7 +133,10 @@ def send_video(chat_id, path):
 def handle(update):
     entry = update.get("message") or {}
     user = entry.get("from") or {}
-    chat_id = (entry.get("chat") or {}).get("id")
+    chat = entry.get("chat") or {}
+    if chat.get("type") != "private":
+        return
+    chat_id = chat.get("id")
     user_id = user.get("id")
     text = entry.get("text") or ""
     if not chat_id or not isinstance(user_id, int):
