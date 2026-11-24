@@ -73,6 +73,14 @@ class SecurityTests(unittest.TestCase):
         for stdout in ("", "not json", "{}", '{"ok":"yes"}'):
             with self.assertRaises(ValueError):
                 bot.parse_newpipe_result(stdout, 1)
+    def test_x_tweet_without_video_has_specific_diagnostic(self):
+        reason, message = bot.classify_ytdlp_error(
+            "[twitter] 123: No video could be found in this tweet"
+        )
+        self.assertEqual(reason, "no_video_in_post")
+        self.assertIn("فيديو مرفق", message)
+        self.assertNotIn("https://", message)
+
     def test_parse_message(self):
         self.assertEqual(bot.extract_url("Hi https://youtu.be/123."), "https://youtu.be/123")
         self.assertIsNone(bot.extract_url("nothing"))
