@@ -8,7 +8,8 @@ Official Telegram bot: **[@NovaOrbitDLBot](https://t.me/NovaOrbitDLBot)**. This 
 
 - Telegram long polling. No incoming ports, public domain or webhook needed.
 - Private access based on Telegram numeric user IDs. Unapproved users cannot download.
-- YouTube extraction through the same NewPipeExtractor v0.26.5 library used by NOVADownloader Android; SoundCloud and X/Twitter use `yt-dlp`.
+- YouTube extraction through the same NewPipeExtractor v0.26.5 library used by NOVADownloader Android; SoundCloud uses `yt-dlp`.
+- Ordinary public X posts use the same FxTwitter/vxTwitter public metadata fallback as the NOVA Android app, validating `video.twimg.com` MP4/HLS URLs before download. X Broadcast replays use a separate bounded HLS path.
 - Ended X Broadcast replays use a dedicated HLS path, prefer up to 480p, enforce the 45 MiB temporary/final output ceiling, and upload as MP4 documents. Ordinary X posts continue through the standard extractor.
 - YouTube selects a compatible MP4 stream at or below 720p, preferring separate video + M4A audio and merging with FFmpeg without re-encoding. A progressive MP4 fallback is used when needed.
 - Up to 720p where available, one active download/upload at a time, 45 MiB final file limit. Larger videos are rejected.
