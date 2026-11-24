@@ -18,7 +18,8 @@ from urllib.request import Request, urlopen
 LOG = logging.getLogger("nova")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ALLOWED_RAW = os.environ.get("TELEGRAM_ALLOWED_USER_IDS", "")
-MAX_MB = int(os.environ.get("MAX_VIDEO_MB", "45"))
+MAX_SAFE_MB = 47  # MiB; keeps the upload below Telegram cloud Bot API 50 MB limit.
+MAX_MB = int(os.environ.get("MAX_VIDEO_MB", str(MAX_SAFE_MB)))
 MAX_BYTES = MAX_MB * 1024 * 1024
 DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT_SECONDS", "900"))
 WORKDIR = Path(os.environ.get("WORKDIR", "/downloads"))
@@ -220,7 +221,7 @@ def download_youtube(url, folder):
             "login_required": "المصدر يتطلب تسجيل دخول فعلًا، والبوت لا يستخدم حسابات أو Cookies.",
             "source_rate_limited": "YouTube فرض حدًا مؤقتًا على الطلبات. انتظر قليلًا قبل المحاولة.",
             "source_forbidden": "YouTube رفض طلب الوصول إلى مسار الفيديو.",
-            "no_compatible_stream_under_limit": "لم نجد جودة MP4 متوافقة ضمن حد 45 MB.",
+            "no_compatible_stream_under_limit": f"لم نجد جودة MP4 متوافقة ضمن حد {MAX_MB} MB.",
             "extractor_error": "NewPipe لم يتمكن من استخراج بيانات الفيديو. نحتاج رمز الخطأ التفصيلي من السجل.",
             "youtube_unavailable": "الفيديو غير متاح عبر NewPipe من هذا السيرفر.",
         }
@@ -233,7 +234,7 @@ def download_youtube(url, folder):
         raise ValueError("لم يتم العثور على رابط صوت صالح.")
     estimated = int(metadata.get("video_bytes") or 0) + int(metadata.get("audio_bytes") or 0)
     if estimated > 0 and estimated > MAX_BYTES:
-        raise ValueError("حجم الفيديو يتجاوز حد الإرسال البالغ 45 MB.")
+        raise ValueError(f"حجم الفيديو يتجاوز حد الإرسال البالغ {MAX_MB} MB.")
 
     video_path = folder / "nova-video.mp4"
     audio_path = folder / "nova-audio.m4a"
@@ -283,7 +284,7 @@ def download_youtube(url, folder):
 
     final_size = output_path.stat().st_size
     if not 0 < final_size <= MAX_BYTES:
-        raise ValueError("الملف النهائي أكبر من حد الإرسال البالغ 45 MB.")
+        raise ValueError(f"الملف النهائي أكبر من حد الإرسال البالغ {MAX_MB} MB.")
     LOG.info("NewPipe download ready (resolution=%s, bytes=%d)",
              metadata.get("resolution", "unknown"), final_size)
     return output_path
@@ -496,7 +497,7 @@ def download_x_status(url, folder):
             with urlopen(request, timeout=45) as response, output.open("wb") as target:
                 declared = response.headers.get("Content-Length")
                 if declared and declared.isdigit() and int(declared) > MAX_BYTES:
-                    raise ValueError("حجم فيديو X يتجاوز حد 45MB.")
+                    raise ValueError(f"حجم فيديو X يتجاوز حد {MAX_MB}MB.")
                 while True:
                     if time.monotonic() - started > DOWNLOAD_TIMEOUT:
                         raise ValueError("انتهت مهلة تنزيل فيديو X.")
@@ -505,7 +506,7 @@ def download_x_status(url, folder):
                         break
                     written += len(chunk)
                     if written > MAX_BYTES:
-                        raise ValueError("حجم فيديو X تجاوز حد 45MB.")
+                        raise ValueError(f"حجم فيديو X تجاوز حد {MAX_MB}MB.")
                     target.write(chunk)
         except Exception:
             output.unlink(missing_ok=True)
@@ -536,13 +537,13 @@ def download_x_status(url, folder):
                 while process.poll() is None:
                     if _folder_bytes(folder) > MAX_BYTES:
                         _stop_download_process(process)
-                        raise ValueError("حجم فيديو HLS من X تجاوز حد 45MB.")
+                        raise ValueError(f"حجم فيديو HLS من X تجاوز حد {MAX_MB}MB.")
                     if time.monotonic() - started >= DOWNLOAD_TIMEOUT:
                         _stop_download_process(process)
                         raise ValueError("انتهت مهلة تنزيل HLS من X.")
                     time.sleep(0.25)
                 if _folder_bytes(folder) > MAX_BYTES:
-                    raise ValueError("حجم فيديو HLS من X تجاوز حد 45MB.")
+                    raise ValueError(f"حجم فيديو HLS من X تجاوز حد {MAX_MB}MB.")
                 if process.returncode:
                     error_output.seek(0)
                     stderr = error_output.read(16384).decode("utf-8", "replace")
@@ -555,7 +556,7 @@ def download_x_status(url, folder):
         videos = [p for p in folder.iterdir() if p.is_file()
                   and p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")]
         if len(videos) != 1 or not 0 < videos[0].stat().st_size <= MAX_BYTES:
-            raise ValueError("ملف فيديو X غير صالح أو يتجاوز حد 45MB.")
+            raise ValueError(f"ملف فيديو X غير صالح أو يتجاوز حد {MAX_MB}MB.")
         return videos[0]
     raise ValueError("لم يعثر X على مسار فيديو مدعوم.")
 
@@ -634,7 +635,7 @@ def download_x_broadcast(url, folder):
                 if _folder_bytes(folder) > MAX_BYTES:
                     _stop_download_process(process)
                     raise ValueError(
-                        "حجم تسجيل البث تجاوز حد 45MB. لم نرسل ملفًا جزئيًا."
+                        f"حجم تسجيل البث تجاوز حد {MAX_MB}MB. لم نرسل ملفًا جزئيًا."
                     )
                 if time.monotonic() - started >= DOWNLOAD_TIMEOUT:
                     _stop_download_process(process)
@@ -645,7 +646,7 @@ def download_x_broadcast(url, folder):
 
             if _folder_bytes(folder) > MAX_BYTES:
                 raise ValueError(
-                    "حجم تسجيل البث تجاوز حد 45MB. لم نرسل ملفًا جزئيًا."
+                    f"حجم تسجيل البث تجاوز حد {MAX_MB}MB. لم نرسل ملفًا جزئيًا."
                 )
 
             if process.returncode:
@@ -665,7 +666,7 @@ def download_x_broadcast(url, folder):
         raise ValueError("لم يتم إنشاء ملف فيديو صالح من تسجيل X.")
     selected = videos[0]
     if not 0 < selected.stat().st_size <= MAX_BYTES:
-        raise ValueError("حجم تسجيل X يتجاوز حد الإرسال البالغ 45MB.")
+        raise ValueError(f"حجم تسجيل X يتجاوز حد الإرسال البالغ {MAX_MB}MB.")
     LOG.info("X broadcast replay ready (bytes=%d)", selected.stat().st_size)
     return selected
 
@@ -826,7 +827,7 @@ def handle(update):
 def main():
     if not TOKEN or ":" not in TOKEN or not allowed_ids():
         raise SystemExit("Set TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USER_IDS before startup")
-    if not 1 <= MAX_MB <= 45 or not 30 <= DOWNLOAD_TIMEOUT <= 3600:
+    if not 1 <= MAX_MB <= MAX_SAFE_MB or not 30 <= DOWNLOAD_TIMEOUT <= 3600:
         raise SystemExit("Invalid resource limits")
     WORKDIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
