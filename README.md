@@ -8,13 +8,14 @@ Official Telegram bot: **[@NovaOrbitDLBot](https://t.me/NovaOrbitDLBot)**. This 
 
 - Telegram long polling. No incoming ports, public domain or webhook needed.
 - Private access based on Telegram numeric user IDs. Unapproved users cannot download.
-- Public HTTPS links from YouTube, SoundCloud and X/Twitter via `yt-dlp`; actual site support depends on upstream availability.
+- YouTube extraction through the same NewPipeExtractor v0.26.5 library used by NOVADownloader Android; SoundCloud and X/Twitter remain on `yt-dlp`.
+- YouTube selects a compatible MP4 stream at or below 720p, preferring separate video + M4A audio and merging with FFmpeg without re-encoding. A progressive MP4 fallback is used when needed.
 - Up to 720p where available, one active download/upload at a time, 45 MiB final file limit. Larger videos are rejected.
 - Temporary download files are deleted after each task. No user-provided cookies, account logins, DRM bypass or arbitrary-domain fetching.
 - Non-root Docker service, read-only filesystem, 768 MiB RAM / 1 vCPU, 256 MiB ephemeral download storage, bounded logs.
 - Unit tests, CI, and no tokens stored in Git.
 
-**Scope:** Direct MP4 from arbitrary sites, MEGA, Witanime, playlists, quality selection and Telegram Local Bot API are **not yet implemented**. The initial bot does **not** expose the whole Android NOVA feature set. Downloads should be limited to content you have permission to save.
+**Scope:** Direct MP4 from arbitrary sites, MEGA, Witanime, playlists, interactive quality selection and Telegram Local Bot API are **not yet implemented**. The initial bot does **not** expose the whole Android NOVA feature set. Downloads should be limited to content you have permission to save.
 
 ## Setup on Ubuntu (ARM64 supported)
 
@@ -80,7 +81,7 @@ python3 -m compileall -q bot.py tests
 docker compose config --quiet  # requires .env
 ```
 
-These tests cover URL restrictions and authorization, not live third-party downloads or Telegram upload. End-to-end smoke tests and container resource profiling must pass before treating this as production-ready.
+These tests cover URL restrictions, authorization and safe stream-host validation, not live NewPipe extraction, third-party downloads or Telegram upload. End-to-end smoke tests and container resource profiling must pass before treating this as production-ready. End-to-end smoke tests and container resource profiling must pass before treating this as production-ready.
 
 ## Security notes
 
