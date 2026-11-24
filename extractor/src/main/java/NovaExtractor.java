@@ -174,7 +174,10 @@ public final class NovaExtractor {
             String detail = error.getMessage() == null ? "" : error.getMessage().toLowerCase();
             String errorType = error.getClass().getSimpleName();
             String type = errorType.toLowerCase();
-            String reason = type.contains("recaptcha") || detail.contains("captcha")
+            String reason = type.contains("signinconfirmnotbot")
+                || detail.contains("temporarily blocked anonymous watch access")
+                ? "youtube_anti_bot"
+                : type.contains("recaptcha") || detail.contains("captcha")
                 || detail.contains("recaptcha") ? "source_challenge"
                 : type.contains("contentnotavailable") ? "youtube_unavailable"
                 : detail.contains("sign in") || detail.contains("login") ? "login_required"
