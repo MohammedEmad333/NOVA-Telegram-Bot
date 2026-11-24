@@ -103,6 +103,62 @@ class SecurityTests(unittest.TestCase):
             self.assertEqual(result.name, "nova-audio.mp3")
             self.assertEqual(result.read_bytes(), b"mp3-data")
 
+    def test_x_status_id_strips_tracking_parameters_and_rejects_bad_hosts(self):
+        self.assertEqual(
+            bot.x_status_id("https://x.com/xmov/status/2123052267821826135?a=tracking&s=20"),
+            "2123052267821826135",
+        )
+        self.assertEqual(
+            bot.x_status_id("https://twitter.com/user/status/1234567890123456789"),
+            "1234567890123456789",
+        )
+        self.assertIsNone(bot.x_status_id("https://x.com.evil.test/user/status/123456789012"))
+        self.assertIsNone(bot.x_status_id("http://x.com/user/status/123456789012"))
+        self.assertIsNone(bot.x_status_id("https://x.com/i/broadcasts/123456789012"))
+
+    def test_x_media_url_requires_video_twitter_cdn_and_suffix(self):
+        self.assertTrue(bot._safe_x_media_url(
+            "https://video.twimg.com/ext_tw_video/123/pu/vid/avc1/720x1280/clip.mp4", ".mp4"
+        ))
+        self.assertTrue(bot._safe_x_media_url(
+            "https://video.twimg.com/ext_tw_video/123/pu/pl/clip.m3u8", ".m3u8"
+        ))
+        self.assertFalse(bot._safe_x_media_url("https://evil.test/clip.mp4", ".mp4"))
+        self.assertFalse(bot._safe_x_media_url("http://video.twimg.com/clip.mp4", ".mp4"))
+        self.assertFalse(bot._safe_x_media_url("https://video.twimg.com/clip.mp4.evil", ".mp4"))
+
+    def test_fx_twitter_metadata_parser_extracts_public_mp4_variants(self):
+        status_id = "2123052267821826135"
+        media_url = "https://video.twimg.com/ext_tw_video/123/pu/vid/avc1/720x1280/clip.mp4"
+        root = {
+            "code": 200,
+            "tweet": {
+                "id": status_id,
+                "media": {"videos": [{
+                    "height": 1280,
+                    "formats": [{"url": media_url, "bitrate": 832000}],
+                }]},
+            },
+        }
+        candidates = bot._x_video_candidates(root, status_id)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0][2], media_url)
+        self.assertEqual(candidates[0][3], "mp4")
+
+    def test_vx_twitter_backup_metadata_parser_checks_status_id(self):
+        status_id = "2123052267821826135"
+        media_url = "https://video.twimg.com/ext_tw_video/123/pu/vid/avc1/720x1280/clip.mp4"
+        root = {
+            "tweetID": status_id,
+            "media_extended": [{
+                "type": "video", "url": media_url,
+                "size": {"width": 720, "height": 1280},
+            }],
+        }
+        self.assertEqual(bot._x_video_candidates(root, status_id, True)[0][2], media_url)
+        root["tweetID"] = "9999999999999999999"
+        self.assertEqual(bot._x_video_candidates(root, status_id, True), [])
+
     def test_x_broadcast_url_is_recognized_only_on_trusted_hosts(self):
         self.assertTrue(bot.is_x_broadcast_url(
             "https://x.com/i/broadcasts/1jMJgkRXbqmJL"
