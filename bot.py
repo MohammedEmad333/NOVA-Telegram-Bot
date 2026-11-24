@@ -6,6 +6,7 @@ import sys
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -377,10 +378,15 @@ def _stop_download_process(process):
     if process.poll() is not None:
         return
     try:
-        process.terminate()
+        os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=5)
+    except ProcessLookupError:
+        return
     except subprocess.TimeoutExpired:
-        process.kill()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         process.wait(timeout=5)
 
 
@@ -392,7 +398,7 @@ def download_x_broadcast(url, folder):
             try:
                 process = subprocess.Popen(
                     args, cwd=str(folder), stdout=subprocess.DEVNULL,
-                    stderr=error_output,
+                    stderr=error_output, start_new_session=True,
                 )
             except OSError as exc:
                 LOG.warning("Could not start X broadcast downloader (%s)",
