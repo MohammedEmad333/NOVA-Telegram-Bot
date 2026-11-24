@@ -167,6 +167,112 @@ def classify_ytdlp_error(stderr):
     return ("unknown", "تعذّر استخراج الفيديو. السبب غير معروف بعد؛ أعد المحاولة لاحقًا.")
 
 
+def download_youtube(url, folder):
+    """Resolve YouTube streams with the same NewPipeExtractor version used by NOVA Android."""
+    command = [
+        "java", "-cp", "/opt/nova-extractor/lib/*", "NovaExtractor", url,
+    ]
+    try:
+        result = subprocess.run(
+            command, cwd=str(folder), stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=120, check=False, text=True,
+        )
+    except subprocess.TimeoutExpired:
+        raise ValueError("انتهت مهلة تحليل YouTube. جرّب مرة أخرى لاحقًا.")
+    if result.returncode:
+        raise ValueError("تعذّر استخراج مسارات الفيديو من YouTube.")
+    try:
+        metadata = json.loads(result.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError, json.JSONDecodeError):
+        LOG.warning("NewPipe extractor returned invalid metadata")
+        raise ValueError("تعذّر قراءة بيانات الفيديو المستخرجة.")
+    if not metadata.get("ok"):
+        reason = metadata.get("reason", "extractor_error")
+        LOG.warning("NewPipe extraction failed (reason=%s)", reason)
+        messages = {
+            "source_challenge": "YouTube طلب تحققًا من المصدر. لم يتم تجاوز أنظمة الحماية.",
+            "login_required": "الفيديو يتطلب تسجيل دخول، والبوت لا يستخدم حسابات أو Cookies.",
+            "source_rate_limited": "YouTube فرض حدًا مؤقتًا على الطلبات. انتظر قليلًا قبل المحاولة.",
+            "source_forbidden": "YouTube رفض طلب الوصول إلى مسار الفيديو.",
+            "no_compatible_stream_under_limit": "لم نجد جودة MP4 متوافقة ضمن حد 45 MB.",
+        }
+        raise ValueError(messages.get(reason, "تعذّر استخراج الفيديو من YouTube."))
+    video_url = metadata.get("video_url")
+    audio_url = metadata.get("audio_url")
+    if not video_url or not permitted_media_url(video_url):
+        raise ValueError("لم يتم العثور على رابط فيديو صالح.")
+    if audio_url and not permitted_media_url(audio_url):
+        raise ValueError("لم يتم العثور على رابط صوت صالح.")
+    estimated = int(metadata.get("video_bytes") or 0) + int(metadata.get("audio_bytes") or 0)
+    if estimated > 0 and estimated > MAX_BYTES:
+        raise ValueError("حجم الفيديو يتجاوز حد الإرسال البالغ 45 MB.")
+
+    video_path = folder / "nova-video.mp4"
+    audio_path = folder / "nova-audio.m4a"
+    output_path = folder / "nova.mp4"
+
+    def fetch_stream(stream_url, destination, remaining):
+        request = Request(stream_url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0",
+            "Referer": "https://www.youtube.com/",
+            "Accept-Encoding": "identity",
+        })
+        written = 0
+        with urlopen(request, timeout=45) as response, destination.open("wb") as target:
+            while True:
+                chunk = response.read(256 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > remaining:
+                    raise ValueError("حجم مسار الفيديو تجاوز الحد المسموح.")
+                target.write(chunk)
+        if written == 0:
+            raise ValueError("أعاد مصدر الفيديو ملفًا فارغًا.")
+        return written
+
+    video_size = fetch_stream(video_url, video_path, MAX_BYTES)
+    if audio_url:
+        audio_size = fetch_stream(audio_url, audio_path, MAX_BYTES - video_size)
+        try:
+            merged = subprocess.run(
+                ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                 "-i", str(video_path), "-i", str(audio_path),
+                 "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
+                 "-movflags", "+faststart", "-y", str(output_path)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=90, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise ValueError("انتهت مهلة دمج الصوت والفيديو.")
+        if merged.returncode != 0 or not output_path.is_file():
+            LOG.warning("FFmpeg stream mux failed (exit=%d)", merged.returncode)
+            raise ValueError("تعذّر دمج الصوت والفيديو.")
+        video_path.unlink(missing_ok=True)
+        audio_path.unlink(missing_ok=True)
+    else:
+        video_path.rename(output_path)
+
+    final_size = output_path.stat().st_size
+    if not 0 < final_size <= MAX_BYTES:
+        raise ValueError("الملف النهائي أكبر من حد الإرسال البالغ 45 MB.")
+    LOG.info("NewPipe download ready (resolution=%s, bytes=%d)",
+             metadata.get("resolution", "unknown"), final_size)
+    return output_path
+
+
+def permitted_media_url(value):
+    """Only accept extractor-issued Google video CDN URLs."""
+    try:
+        parsed = urlsplit(value)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        return (parsed.scheme == "https" and parsed.username is None
+                and parsed.password is None and parsed.port in (None, 443)
+                and (host == "googlevideo.com" or host.endswith(".googlevideo.com")))
+    except ValueError:
+        return False
+
+
 def download(url, folder):
     """A bounded, one-video download. No playlists, cookies, login or custom config."""
     output = str(folder / "nova.%(ext)s")
@@ -260,7 +366,11 @@ def handle(update):
     safe_send(chat_id, "جاري تجهيز الفيديو…")
     folder = Path(tempfile.mkdtemp(prefix="nova-", dir=str(WORKDIR)))
     try:
-        file_path = download(url, folder)
+        host = (urlsplit(url).hostname or "").lower()
+        if host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be":
+            file_path = download_youtube(url, folder)
+        else:
+            file_path = download(url, folder)
         send_video(chat_id, file_path)
         safe_send(chat_id, "اكتمل الإرسال ✅")
     except ValueError as exc:
