@@ -167,6 +167,19 @@ def classify_ytdlp_error(stderr):
     return ("unknown", "تعذّر استخراج الفيديو. السبب غير معروف بعد؛ أعد المحاولة لاحقًا.")
 
 
+def parse_newpipe_result(stdout, returncode):
+    """Read the bridge's final JSON line, including expected diagnostic exits."""
+    try:
+        lines = [line.strip() for line in (stdout or "").splitlines() if line.strip()]
+        metadata = json.loads(lines[-1])
+    except (ValueError, IndexError, json.JSONDecodeError):
+        raise ValueError("invalid_extractor_output") from None
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("ok"), bool):
+        raise ValueError("invalid_extractor_output")
+    if returncode and metadata.get("ok"):
+        raise ValueError("inconsistent_extractor_exit")
+    return metadata
+
 def download_youtube(url, folder):
     """Resolve YouTube streams with the same NewPipeExtractor version used by NOVA Android."""
     command = [
@@ -180,16 +193,11 @@ def download_youtube(url, folder):
     except subprocess.TimeoutExpired:
         raise ValueError("انتهت مهلة تحليل YouTube. جرّب مرة أخرى لاحقًا.")
     try:
-        # The Java bridge emits a safe JSON diagnostic before exiting non-zero.
-        # Parse stdout first so its reason code is not discarded.
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        metadata = json.loads(lines[-1])
-    except (ValueError, IndexError, json.JSONDecodeError):
-        LOG.warning("NewPipe extractor returned invalid metadata (exit=%d)", result.returncode)
-        raise ValueError("تعذّر قراءة نتيجة محرك YouTube. راجع سجل التشخيص.")
-    if result.returncode and metadata.get("ok"):
-        LOG.warning("NewPipe extractor exited non-zero despite success metadata")
-        raise ValueError("تعذّر تأكيد نتيجة استخراج YouTube.")
+        metadata = parse_newpipe_result(result.stdout, result.returncode)
+    except ValueError as exc:
+        LOG.warning("NewPipe extractor returned invalid metadata (exit=%d, reason=%s)",
+                    result.returncode, str(exc))
+        raise ValueError("تعذّر قراءة نتيجة محرك YouTube. راجع سجل التشخيص.") from None
     if not metadata.get("ok"):
         reason = metadata.get("reason", "extractor_error")
         LOG.warning("NewPipe extraction failed (reason=%s)", reason)
