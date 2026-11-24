@@ -167,6 +167,19 @@ def classify_ytdlp_error(stderr):
     return ("unknown", "تعذّر استخراج الفيديو. السبب غير معروف بعد؛ أعد المحاولة لاحقًا.")
 
 
+def parse_newpipe_result(stdout, returncode):
+    """Read the bridge's final JSON line, including expected diagnostic exits."""
+    try:
+        lines = [line.strip() for line in (stdout or "").splitlines() if line.strip()]
+        metadata = json.loads(lines[-1])
+    except (ValueError, IndexError, json.JSONDecodeError):
+        raise ValueError("invalid_extractor_output") from None
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("ok"), bool):
+        raise ValueError("invalid_extractor_output")
+    if returncode and metadata.get("ok"):
+        raise ValueError("inconsistent_extractor_exit")
+    return metadata
+
 def download_youtube(url, folder):
     """Resolve YouTube streams with the same NewPipeExtractor version used by NOVA Android."""
     command = [
@@ -179,22 +192,24 @@ def download_youtube(url, folder):
         )
     except subprocess.TimeoutExpired:
         raise ValueError("انتهت مهلة تحليل YouTube. جرّب مرة أخرى لاحقًا.")
-    if result.returncode:
-        raise ValueError("تعذّر استخراج مسارات الفيديو من YouTube.")
     try:
-        metadata = json.loads(result.stdout.strip().splitlines()[-1])
-    except (ValueError, IndexError, json.JSONDecodeError):
-        LOG.warning("NewPipe extractor returned invalid metadata")
-        raise ValueError("تعذّر قراءة بيانات الفيديو المستخرجة.")
+        metadata = parse_newpipe_result(result.stdout, result.returncode)
+    except ValueError as exc:
+        LOG.warning("NewPipe extractor returned invalid metadata (exit=%d, reason=%s)",
+                    result.returncode, str(exc))
+        raise ValueError("تعذّر قراءة نتيجة محرك YouTube. راجع سجل التشخيص.") from None
     if not metadata.get("ok"):
         reason = metadata.get("reason", "extractor_error")
-        LOG.warning("NewPipe extraction failed (reason=%s)", reason)
+        LOG.warning("NewPipe extraction failed (reason=%s, error_type=%s)",
+                    reason, metadata.get("error_type", "none"))
         messages = {
             "source_challenge": "YouTube طلب تحققًا من المصدر. لم يتم تجاوز أنظمة الحماية.",
             "login_required": "الفيديو يتطلب تسجيل دخول، والبوت لا يستخدم حسابات أو Cookies.",
             "source_rate_limited": "YouTube فرض حدًا مؤقتًا على الطلبات. انتظر قليلًا قبل المحاولة.",
             "source_forbidden": "YouTube رفض طلب الوصول إلى مسار الفيديو.",
             "no_compatible_stream_under_limit": "لم نجد جودة MP4 متوافقة ضمن حد 45 MB.",
+            "extractor_error": "NewPipe لم يتمكن من استخراج بيانات الفيديو. نحتاج رمز الخطأ التفصيلي من السجل.",
+            "youtube_unavailable": "الفيديو غير متاح عبر NewPipe من هذا السيرفر.",
         }
         raise ValueError(messages.get(reason, "تعذّر استخراج الفيديو من YouTube."))
     video_url = metadata.get("video_url")

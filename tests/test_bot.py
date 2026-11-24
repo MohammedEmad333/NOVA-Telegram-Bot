@@ -52,6 +52,22 @@ class SecurityTests(unittest.TestCase):
         self.assertFalse(bot.permitted_media_url("https://googlevideo.com.evil.test/video"))
         self.assertFalse(bot.permitted_media_url("https://user@googlevideo.com/video"))
 
+    def test_newpipe_json_diagnostic_is_parsed_even_when_java_exits_nonzero(self):
+        payload = '{"ok":false,"reason":"source_challenge","message":"safe"}'
+        result = bot.parse_newpipe_result(payload, 1)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "source_challenge")
+
+    def test_newpipe_success_requires_zero_exit(self):
+        payload = '{"ok":true,"video_url":"https://rr1.googlevideo.com/videoplayback"}'
+        self.assertTrue(bot.parse_newpipe_result(payload, 0)["ok"])
+        with self.assertRaises(ValueError):
+            bot.parse_newpipe_result(payload, 1)
+
+    def test_newpipe_invalid_output_is_rejected(self):
+        for stdout in ("", "not json", "{}", '{"ok":"yes"}'):
+            with self.assertRaises(ValueError):
+                bot.parse_newpipe_result(stdout, 1)
     def test_parse_message(self):
         self.assertEqual(bot.extract_url("Hi https://youtu.be/123."), "https://youtu.be/123")
         self.assertIsNone(bot.extract_url("nothing"))
