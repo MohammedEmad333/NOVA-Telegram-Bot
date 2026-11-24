@@ -50,6 +50,9 @@ The default standard Telegram Bot API supports uploads up to 50 MB; the MVP caps
 
 Do not expect hard guarantees from CPU quota alone. Avoid running heavy transcoding concurrently with production database workloads.
 
+## YouTube anonymous-access restrictions
+
+NewPipeExtractor's `SignInConfirmNotBotException` specifically means YouTube likely blocked anonymous watch access from the server IP. It does not establish that a video is private or that a Google account is required. The extractor project's exception documentation notes that this can usually only be resolved by changing IP. Do not respond by adding cookies, borrowing account sessions, or attempting to bypass YouTube verification. Use a permitted source/network for content you are authorized to download, or leave the source unsupported until access is available.
 ## Telegram HTTP 429 troubleshooting
 
 If the bot starts but does not answer and logs show HTTP 429 (Too Many Requests),
