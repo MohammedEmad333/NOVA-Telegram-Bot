@@ -45,6 +45,13 @@ class SecurityTests(unittest.TestCase):
             self.assertTrue(message)
             self.assertNotIn("https://", message)
 
+    def test_extractor_media_urls_are_limited_to_google_video_cdn(self):
+        self.assertTrue(bot.permitted_media_url("https://rr1---sn.googlevideo.com/videoplayback"))
+        self.assertFalse(bot.permitted_media_url("https://youtube.com/watch?v=1"))
+        self.assertFalse(bot.permitted_media_url("http://rr1---sn.googlevideo.com/video"))
+        self.assertFalse(bot.permitted_media_url("https://googlevideo.com.evil.test/video"))
+        self.assertFalse(bot.permitted_media_url("https://user@googlevideo.com/video"))
+
     def test_parse_message(self):
         self.assertEqual(bot.extract_url("Hi https://youtu.be/123."), "https://youtu.be/123")
         self.assertIsNone(bot.extract_url("nothing"))
