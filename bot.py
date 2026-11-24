@@ -200,7 +200,8 @@ def download_youtube(url, folder):
         raise ValueError("تعذّر قراءة نتيجة محرك YouTube. راجع سجل التشخيص.") from None
     if not metadata.get("ok"):
         reason = metadata.get("reason", "extractor_error")
-        LOG.warning("NewPipe extraction failed (reason=%s)", reason)
+        LOG.warning("NewPipe extraction failed (reason=%s, error_type=%s)",
+                    reason, metadata.get("error_type", "none"))
         messages = {
             "source_challenge": "YouTube طلب تحققًا من المصدر. لم يتم تجاوز أنظمة الحماية.",
             "login_required": "الفيديو يتطلب تسجيل دخول، والبوت لا يستخدم حسابات أو Cookies.",
