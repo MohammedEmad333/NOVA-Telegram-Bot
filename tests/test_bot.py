@@ -186,6 +186,8 @@ class SecurityTests(unittest.TestCase):
         self.assertIn("best[height<=480]/best[height<=720]/best", args)
         self.assertIn("--max-filesize", args)
         self.assertIn(str(bot.MAX_BYTES), args)
+        self.assertEqual(bot.MAX_SAFE_MB, 47)
+        self.assertLessEqual(bot.MAX_MB, bot.MAX_SAFE_MB)
         self.assertIn("--merge-output-format", args)
         self.assertIn("mp4", args)
 
