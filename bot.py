@@ -336,6 +336,209 @@ def download(url, folder):
     return selected
 
 
+def x_status_id(url):
+    """Return only a numeric public X status ID from a canonical status URL."""
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if (parsed.scheme != "https" or parsed.username or parsed.password
+                or parsed.port not in (None, 443)
+                or host not in ("x.com", "www.x.com", "twitter.com",
+                                "www.twitter.com", "mobile.twitter.com")):
+            return None
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) not in (3, 5) or parts[1] != "status":
+            return None
+        if len(parts) == 5 and (parts[3] != "video"
+                                or not parts[4].isdigit()
+                                or not 1 <= int(parts[4]) <= 16):
+            return None
+        return parts[2] if parts[2].isdigit() and 10 <= len(parts[2]) <= 22 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_x_media_url(value, suffix):
+    try:
+        parsed = urlsplit(value)
+        return (parsed.scheme == "https" and parsed.username is None
+                and parsed.password is None and parsed.port in (None, 443)
+                and parsed.hostname == "video.twimg.com"
+                and (parsed.path or "").lower().endswith(suffix))
+    except (ValueError, TypeError):
+        return False
+
+
+def _fetch_x_public_json(endpoint):
+    request = Request(endpoint, headers={
+        "Accept": "application/json",
+        "User-Agent": "NOVA-Telegram-Bot/1.0 (public media metadata)",
+    })
+    with urlopen(request, timeout=20) as response:
+        raw = response.read(512 * 1024 + 1)
+    if len(raw) > 512 * 1024:
+        raise ValueError("X metadata response exceeded limit")
+    return json.loads(raw.decode("utf-8"))
+
+
+def _x_video_candidates(root, status_id, backup=False):
+    candidates = []
+    if backup:
+        if str(root.get("tweetID", "")) != status_id:
+            return candidates
+        items = root.get("media_extended") or []
+        for item in items[:16]:
+            if not isinstance(item, dict) or item.get("type") not in ("video", "gif"):
+                continue
+            url = item.get("url", "")
+            if _safe_x_media_url(url, ".mp4"):
+                size = item.get("size") if isinstance(item.get("size"), dict) else {}
+                candidates.append((int(size.get("height") or 0), 0, url, "mp4"))
+            elif _safe_x_media_url(url, ".m3u8"):
+                size = item.get("size") if isinstance(item.get("size"), dict) else {}
+                candidates.append((int(size.get("height") or 0), 0, url, "hls"))
+        if not candidates:
+            for url in (root.get("mediaURLs") or [])[:16]:
+                if _safe_x_media_url(url, ".mp4"):
+                    candidates.append((0, 0, url, "mp4"))
+                elif _safe_x_media_url(url, ".m3u8"):
+                    candidates.append((0, 0, url, "hls"))
+        return candidates
+
+    tweet = root.get("tweet")
+    if not isinstance(tweet, dict) or root.get("code") != 200:
+        return candidates
+    returned_id = str(tweet.get("id") or "")
+    if returned_id and returned_id != status_id:
+        return candidates
+    media = tweet.get("media")
+    videos = media.get("videos") if isinstance(media, dict) else None
+    if not isinstance(videos, list):
+        return candidates
+    for video in videos[:16]:
+        if not isinstance(video, dict):
+            continue
+        variants = video.get("formats")
+        if not isinstance(variants, list):
+            variants = video.get("variants")
+        if not isinstance(variants, list):
+            variants = []
+        for variant in variants[:32]:
+            if not isinstance(variant, dict):
+                continue
+            url = variant.get("url") or ""
+            try:
+                bitrate = int(variant.get("bitrate") or 0)
+            except (ValueError, TypeError):
+                bitrate = 0
+            try:
+                height = int(video.get("height") or 0)
+            except (ValueError, TypeError):
+                height = 0
+            if _safe_x_media_url(url, ".mp4"):
+                candidates.append((height, bitrate, url, "mp4"))
+            elif _safe_x_media_url(url, ".m3u8"):
+                candidates.append((height, bitrate, url, "hls"))
+        direct = video.get("url") or ""
+        if _safe_x_media_url(direct, ".mp4"):
+            candidates.append((int(video.get("height") or 0), 0, direct, "mp4"))
+        elif _safe_x_media_url(direct, ".m3u8"):
+            candidates.append((int(video.get("height") or 0), 0, direct, "hls"))
+    return candidates
+
+
+def _x_post_metadata(status_id):
+    endpoints = (
+        ("https://api.fxtwitter.com/status/" + status_id, False),
+        ("https://api.vxtwitter.com/Twitter/status/" + status_id, True),
+    )
+    last_error = None
+    for endpoint, backup in endpoints:
+        try:
+            root = _fetch_x_public_json(endpoint)
+            candidates = _x_video_candidates(root, status_id, backup)
+            if candidates:
+                candidates.sort(key=lambda item: (
+                    item[3] == "mp4",
+                    item[0] <= 720 if item[0] else True,
+                    item[1],
+                    item[0],
+                ), reverse=True)
+                return candidates
+            last_error = "no_public_video"
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            last_error = type(exc).__name__
+    LOG.warning("X public metadata providers returned no usable video (reason=%s)",
+                last_error or "unknown")
+    raise ValueError(
+        "لم يتم العثور على فيديو عام قابل للتنزيل في منشور X عبر مصادر البيانات العامة."
+    )
+
+
+def download_x_status(url, folder):
+    """Use the same public FxTwitter/vxTwitter metadata strategy as NOVA Android."""
+    status_id = x_status_id(url)
+    if not status_id:
+        raise ValueError("رابط منشور X غير صالح.")
+    candidates = _x_post_metadata(status_id)
+    selected = next((item for item in candidates if item[3] == "mp4"), None)
+    if selected:
+        height, bitrate, media_url, _ = selected
+        output = folder / "nova-x.mp4"
+        request = Request(media_url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://x.com/",
+            "Accept-Encoding": "identity",
+        })
+        written = 0
+        try:
+            with urlopen(request, timeout=45) as response, output.open("wb") as target:
+                while True:
+                    chunk = response.read(256 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > MAX_BYTES:
+                        raise ValueError("حجم فيديو X تجاوز حد 45MB.")
+                    target.write(chunk)
+        except Exception:
+            output.unlink(missing_ok=True)
+            raise
+        if not written:
+            raise ValueError("أعاد مصدر X ملف فيديو فارغًا.")
+        LOG.info("X public MP4 ready (height=%d, bytes=%d)", height, written)
+        return output
+
+    hls = next((item for item in candidates if item[3] == "hls"), None)
+    if hls:
+        _, _, manifest_url, _ = hls
+        args = [
+            "yt-dlp", "--ignore-config", "--no-playlist", "--no-progress",
+            "--no-warnings", "--no-cache-dir", "--no-part",
+            "--socket-timeout", "20", "--retries", "1", "--fragment-retries", "1",
+            "--max-filesize", str(MAX_BYTES), "--format", "best",
+            "--merge-output-format", "mp4", "--output", str(folder / "nova-x.%(ext)s"),
+            "--", manifest_url,
+        ]
+        try:
+            result = subprocess.run(args, cwd=str(folder), stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, timeout=DOWNLOAD_TIMEOUT,
+                                    check=False, text=True)
+        except subprocess.TimeoutExpired:
+            raise ValueError("انتهت مهلة تنزيل HLS من X.") from None
+        if result.returncode:
+            reason, message = classify_ytdlp_error(result.stderr)
+            LOG.warning("X HLS download failed (exit=%d, reason=%s)",
+                        result.returncode, reason)
+            raise ValueError(message)
+        videos = [p for p in folder.iterdir() if p.is_file()
+                  and p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")]
+        if len(videos) != 1 or not 0 < videos[0].stat().st_size <= MAX_BYTES:
+            raise ValueError("ملف فيديو X غير صالح أو يتجاوز حد 45MB.")
+        return videos[0]
+    raise ValueError("لم يعثر X على مسار فيديو مدعوم.")
+
+
 def is_x_broadcast_url(url):
     """Recognize X/Twitter replay broadcast URLs, not ordinary video posts."""
     try:
@@ -579,6 +782,10 @@ def handle(update):
             file_path = download_x_broadcast(url, folder)
             send_video(chat_id, file_path)
             safe_send(chat_id, "اكتمل إرسال تسجيل البث ✅")
+        elif x_status_id(url):
+            file_path = download_x_status(url, folder)
+            send_video(chat_id, file_path)
+            safe_send(chat_id, "اكتمل إرسال فيديو X ✅")
         else:
             if host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be":
                 file_path = download_youtube(url, folder)
