@@ -81,6 +81,28 @@ class SecurityTests(unittest.TestCase):
         self.assertIn("فيديو مرفق", message)
         self.assertNotIn("https://", message)
 
+    def test_soundcloud_audio_download_creates_bounded_mp3(self):
+        import tempfile
+        from pathlib import Path
+
+        def fake_run(args, **kwargs):
+            output = next(arg for arg in args if "nova-audio.%(ext)s" in arg)
+            Path(kwargs["cwd"], "nova-audio.mp3").write_bytes(b"mp3-data")
+            class Result:
+                returncode = 0
+                stderr = ""
+            self.assertIn("--extract-audio", args)
+            self.assertIn("mp3", args)
+            return Result()
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(bot.subprocess, "run", side_effect=fake_run):
+            result = bot.download_audio(
+                "https://soundcloud.com/example/track", Path(directory)
+            )
+            self.assertEqual(result.name, "nova-audio.mp3")
+            self.assertEqual(result.read_bytes(), b"mp3-data")
+
     def test_parse_message(self):
         self.assertEqual(bot.extract_url("Hi https://youtu.be/123."), "https://youtu.be/123")
         self.assertIsNone(bot.extract_url("nothing"))
