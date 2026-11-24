@@ -327,6 +327,40 @@ def download(url, folder):
     return selected
 
 
+def download_audio(url, folder):
+    """Download one permitted SoundCloud track as bounded MP3 audio."""
+    output = str(folder / "nova-audio.%(ext)s")
+    args = [
+        "yt-dlp", "--ignore-config", "--no-playlist", "--no-progress",
+        "--no-warnings", "--no-cache-dir", "--no-part",
+        "--socket-timeout", "20", "--retries", "2", "--fragment-retries", "2",
+        "--max-filesize", str(MAX_BYTES), "--restrict-filenames",
+        "--format", "bestaudio/best",
+        "--extract-audio", "--audio-format", "mp3", "--audio-quality", "5",
+        "--output", output, "--", url,
+    ]
+    try:
+        result = subprocess.run(args, cwd=str(folder), stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, timeout=DOWNLOAD_TIMEOUT,
+                                check=False, text=True)
+    except subprocess.TimeoutExpired:
+        LOG.warning("SoundCloud audio extraction timed out after %d seconds", DOWNLOAD_TIMEOUT)
+        raise ValueError("انتهت مهلة تحميل الصوت. جرّب مقطعًا أقصر.")
+    if result.returncode:
+        reason, user_message = classify_ytdlp_error(result.stderr)
+        LOG.warning("SoundCloud yt-dlp failed (exit=%d, reason=%s)", result.returncode, reason)
+        raise ValueError(user_message)
+    files = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".mp3"]
+    if len(files) != 1:
+        LOG.warning("SoundCloud extraction completed without a single MP3 output")
+        raise ValueError("لم يتم إنشاء ملف صوت MP3 صالح.")
+    selected = files[0]
+    if not 0 < selected.stat().st_size <= MAX_BYTES:
+        LOG.warning("SoundCloud audio exceeded configured size limit")
+        raise ValueError("حجم الملف الصوتي يتجاوز حد الإرسال.")
+    return selected
+
+
 def send_video(chat_id, path):
     """Stream multipart upload without buffering the entire video in RAM."""
     boundary = "nova_boundary_8d7e6f21"
@@ -354,6 +388,37 @@ def send_video(chat_id, path):
         payload = response.read(8192)
         if response.status != 200 or not json.loads(payload).get("ok"):
             raise RuntimeError("Telegram upload rejected")
+    finally:
+        conn.close()
+
+
+def send_audio(chat_id, path):
+    """Stream an MP3 upload through Telegram's audio endpoint."""
+    boundary = "nova_audio_boundary_6a1f9c42"
+    head = (
+        "--" + boundary + "\r\n"
+        'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+        + str(chat_id) + "\r\n"
+        "--" + boundary + "\r\n"
+        'Content-Disposition: form-data; name="audio"; filename="nova.mp3"\r\n'
+        "Content-Type: audio/mpeg\r\n\r\n"
+    ).encode()
+    tail = ("\r\n--" + boundary + "--\r\n").encode()
+    conn = http.client.HTTPSConnection(API_HOST, timeout=180)
+    try:
+        conn.putrequest("POST", "/bot" + TOKEN + "/sendAudio")
+        conn.putheader("Content-Type", "multipart/form-data; boundary=" + boundary)
+        conn.putheader("Content-Length", str(len(head) + path.stat().st_size + len(tail)))
+        conn.endheaders()
+        conn.send(head)
+        with path.open("rb") as f:
+            while data := f.read(256 * 1024):
+                conn.send(data)
+        conn.send(tail)
+        response = conn.getresponse()
+        payload = response.read(8192)
+        if response.status != 200 or not json.loads(payload).get("ok"):
+            raise RuntimeError("Telegram audio upload rejected")
     finally:
         conn.close()
 
@@ -386,12 +451,18 @@ def handle(update):
     folder = Path(tempfile.mkdtemp(prefix="nova-", dir=str(WORKDIR)))
     try:
         host = (urlsplit(url).hostname or "").lower()
-        if host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be":
-            file_path = download_youtube(url, folder)
+        is_soundcloud = host == "soundcloud.com" or host.endswith(".soundcloud.com")
+        if is_soundcloud:
+            file_path = download_audio(url, folder)
+            send_audio(chat_id, file_path)
+            safe_send(chat_id, "اكتمل إرسال الصوت ✅")
         else:
-            file_path = download(url, folder)
-        send_video(chat_id, file_path)
-        safe_send(chat_id, "اكتمل الإرسال ✅")
+            if host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be":
+                file_path = download_youtube(url, folder)
+            else:
+                file_path = download(url, folder)
+            send_video(chat_id, file_path)
+            safe_send(chat_id, "اكتمل إرسال الفيديو ✅")
     except ValueError as exc:
         safe_send(chat_id, str(exc))
     except (OSError, RuntimeError, json.JSONDecodeError) as exc:
