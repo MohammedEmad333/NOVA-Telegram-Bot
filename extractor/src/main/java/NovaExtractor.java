@@ -172,11 +172,16 @@ public final class NovaExtractor {
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("ok", false);
             String detail = error.getMessage() == null ? "" : error.getMessage().toLowerCase();
-            String reason = detail.contains("captcha") || detail.contains("recaptcha")
-                ? "source_challenge" : detail.contains("sign in") || detail.contains("login")
-                ? "login_required" : detail.contains("429") ? "source_rate_limited"
+            String errorType = error.getClass().getSimpleName();
+            String type = errorType.toLowerCase();
+            String reason = type.contains("recaptcha") || detail.contains("captcha")
+                || detail.contains("recaptcha") ? "source_challenge"
+                : type.contains("contentnotavailable") ? "youtube_unavailable"
+                : detail.contains("sign in") || detail.contains("login") ? "login_required"
+                : detail.contains("429") ? "source_rate_limited"
                 : detail.contains("403") ? "source_forbidden" : "extractor_error";
             result.put("reason", reason);
+            result.put("error_type", errorType);
             result.put("message", "NewPipeExtractor could not resolve this public video.");
             emit(result);
             System.exit(1);
