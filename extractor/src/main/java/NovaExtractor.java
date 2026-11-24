@@ -120,7 +120,7 @@ public final class NovaExtractor {
                     videoOnly.add(stream);
                 }
             }
-            videoOnly.sort(Comparator.comparingInt(v -> heightOf(v.getResolution())).reversed());
+            videoOnly.sort(Comparator.comparingInt((VideoStream v) -> heightOf(v.getResolution())).reversed());
 
             List<AudioStream> audioStreams = new ArrayList<>();
             for (AudioStream stream : info.getAudioStreams()) {
