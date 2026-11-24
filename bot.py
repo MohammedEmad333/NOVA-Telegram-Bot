@@ -203,8 +203,9 @@ def download_youtube(url, folder):
         LOG.warning("NewPipe extraction failed (reason=%s, error_type=%s)",
                     reason, metadata.get("error_type", "none"))
         messages = {
+            "youtube_anti_bot": "YouTube قيّد الوصول المجهول من عنوان IP الخاص بالسيرفر (Sign in to confirm you are not a bot). هذا ليس دليلًا على أن الفيديو خاص أو يحتاج حسابًا. لن نستخدم Cookies أو نتجاوز التحقق.",
             "source_challenge": "YouTube طلب تحققًا من المصدر. لم يتم تجاوز أنظمة الحماية.",
-            "login_required": "الفيديو يتطلب تسجيل دخول، والبوت لا يستخدم حسابات أو Cookies.",
+            "login_required": "المصدر يتطلب تسجيل دخول فعلًا، والبوت لا يستخدم حسابات أو Cookies.",
             "source_rate_limited": "YouTube فرض حدًا مؤقتًا على الطلبات. انتظر قليلًا قبل المحاولة.",
             "source_forbidden": "YouTube رفض طلب الوصول إلى مسار الفيديو.",
             "no_compatible_stream_under_limit": "لم نجد جودة MP4 متوافقة ضمن حد 45 MB.",

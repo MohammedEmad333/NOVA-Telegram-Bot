@@ -52,6 +52,11 @@ class SecurityTests(unittest.TestCase):
         self.assertFalse(bot.permitted_media_url("https://googlevideo.com.evil.test/video"))
         self.assertFalse(bot.permitted_media_url("https://user@googlevideo.com/video"))
 
+    def test_newpipe_antibot_reason_is_not_misreported_as_login(self):
+        payload = '{"ok":false,"reason":"youtube_anti_bot","error_type":"SignInConfirmNotBotException"}'
+        result = bot.parse_newpipe_result(payload, 1)
+        self.assertEqual(result["reason"], "youtube_anti_bot")
+        self.assertNotEqual(result["reason"], "login_required")
     def test_newpipe_json_diagnostic_is_parsed_even_when_java_exits_nonzero(self):
         payload = '{"ok":false,"reason":"source_challenge","message":"safe"}'
         result = bot.parse_newpipe_result(payload, 1)
