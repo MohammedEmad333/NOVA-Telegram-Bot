@@ -27,6 +27,24 @@ class SecurityTests(unittest.TestCase):
         for url in bad:
             self.assertFalse(bot.permitted_url(url), url)
 
+    def test_ytdlp_error_classification_is_safe_and_actionable(self):
+        cases = [
+            ("Sign in to confirm you're not a bot", "youtube_verification"),
+            ("No supported JavaScript runtime", "javascript_runtime_missing"),
+            ("HTTP Error 429: Too Many Requests", "source_rate_limited"),
+            ("HTTP Error 403: Forbidden", "source_forbidden"),
+            ("This video is private", "private_video"),
+            ("Requested format is not available", "no_compatible_format"),
+            ("ffmpeg not found", "ffmpeg_missing"),
+            ("Unsupported URL", "unsupported_url"),
+            ("random upstream error", "unknown"),
+        ]
+        for detail, expected in cases:
+            reason, message = bot.classify_ytdlp_error(detail)
+            self.assertEqual(reason, expected)
+            self.assertTrue(message)
+            self.assertNotIn("https://", message)
+
     def test_parse_message(self):
         self.assertEqual(bot.extract_url("Hi https://youtu.be/123."), "https://youtu.be/123")
         self.assertIsNone(bot.extract_url("nothing"))

@@ -122,6 +122,51 @@ def safe_send(chat_id, text):
         LOG.warning("Could not send message: %s", type(exc).__name__)
 
 
+def classify_ytdlp_error(stderr):
+    """Map yt-dlp diagnostics to safe categories without logging raw URLs or stderr."""
+    detail = (stderr or "").lower()
+    cases = [
+        (("sign in to confirm you're not a bot", "confirm you're not a bot"),
+         ("youtube_verification",
+          "YouTube طلب تحققًا من المصدر. لا يستخدم NOVA حسابات أو يتجاوز أنظمة الحماية.")),
+        (("no supported javascript runtime",),
+         ("javascript_runtime_missing",
+          "بيئة JavaScript المطلوبة لاستخراج YouTube غير متاحة داخل الحاوية.")),
+        (("remote component challenge solver script", "n challenge solving failed",
+          "challenge solving failed"),
+         ("youtube_challenge",
+          "تعذّر حل تحدّي YouTube. نحتاج مراجعة إعدادات yt-dlp ومكوّن EJS.")),
+        (("http error 429", "429: too many requests"),
+         ("source_rate_limited",
+          "المصدر فرض حدًا مؤقتًا على الطلبات. انتظر قليلًا قبل إعادة المحاولة.")),
+        (("http error 403", "403: forbidden"),
+         ("source_forbidden",
+          "المصدر رفض طلب التحميل (HTTP 403). قد لا يسمح بالتحميل من عنوان IP الخاص بالسيرفر.")),
+        (("private video", "this video is private"),
+         ("private_video", "هذا الفيديو خاص ولا يمكن الوصول إليه كرابط عام.")),
+        (("sign in", "login required", "authentication required"),
+         ("login_required", "المصدر يتطلب تسجيل دخول، والبوت لا يستخدم حسابات أو ملفات تعريف ارتباط.")),
+        (("video unavailable", "this video is unavailable", "has been removed"),
+         ("video_unavailable", "الفيديو غير متاح من المصدر حاليًا.")),
+        (("requested format is not available", "no video formats found"),
+         ("no_compatible_format", "لم يعثر NOVA على صيغة فيديو متوافقة لهذا الرابط.")),
+        (("file is larger than max-filesize", "file is larger than the maximum"),
+         ("source_file_too_large", "حجم الفيديو يتجاوز الحد المسموح به للبوت.")),
+        (("ffmpeg not found", "ffmpeg is not installed"),
+         ("ffmpeg_missing", "أداة FFmpeg غير متاحة داخل الحاوية.")),
+        (("unsupported url",),
+         ("unsupported_url", "هذا الرابط غير مدعوم من محرك التحميل.")),
+        (("timed out", "timeout"),
+         ("source_timeout", "انتهت مهلة الاتصال بمصدر الفيديو.")),
+        (("unable to download webpage", "connection reset", "network is unreachable"),
+         ("source_network_error", "تعذّر الاتصال بمصدر الفيديو من السيرفر.")),
+    ]
+    for needles, result in cases:
+        if any(needle in detail for needle in needles):
+            return result
+    return ("unknown", "تعذّر استخراج الفيديو. السبب غير معروف بعد؛ أعد المحاولة لاحقًا.")
+
+
 def download(url, folder):
     """A bounded, one-video download. No playlists, cookies, login or custom config."""
     output = str(folder / "nova.%(ext)s")
@@ -136,19 +181,23 @@ def download(url, folder):
     ]
     try:
         result = subprocess.run(args, cwd=str(folder), stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, timeout=DOWNLOAD_TIMEOUT,
+                                stderr=subprocess.PIPE, timeout=DOWNLOAD_TIMEOUT,
                                 check=False, text=True)
     except subprocess.TimeoutExpired:
+        LOG.warning("yt-dlp timed out after %d seconds", DOWNLOAD_TIMEOUT)
         raise ValueError("انتهت مهلة التحميل. جرّب فيديو أقصر.")
     if result.returncode:
-        LOG.warning("yt-dlp failed (exit code %d)", result.returncode)
-        raise ValueError("تعذّر تحميل الفيديو. الرابط قد يكون غير مدعوم أو الملف كبيرًا.")
+        reason, user_message = classify_ytdlp_error(result.stderr)
+        LOG.warning("yt-dlp failed (exit=%d, reason=%s)", result.returncode, reason)
+        raise ValueError(user_message)
     videos = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in
               (".mp4", ".mkv", ".webm", ".mov")]
     if len(videos) != 1:
-        raise ValueError("لم أتمكن من تجهيز ملف فيديو صالح.")
+        LOG.warning("yt-dlp completed without a recognized video file")
+        raise ValueError("لم يتم إنشاء ملف فيديو نهائي بصيغة مدعومة.")
     selected = videos[0]
     if not 0 < selected.stat().st_size <= MAX_BYTES:
+        LOG.warning("yt-dlp output exceeded configured size limit")
         raise ValueError("الفيديو أكبر من الحد المسموح للإرسال.")
     return selected
 
