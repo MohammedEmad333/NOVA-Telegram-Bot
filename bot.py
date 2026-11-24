@@ -179,13 +179,17 @@ def download_youtube(url, folder):
         )
     except subprocess.TimeoutExpired:
         raise ValueError("انتهت مهلة تحليل YouTube. جرّب مرة أخرى لاحقًا.")
-    if result.returncode:
-        raise ValueError("تعذّر استخراج مسارات الفيديو من YouTube.")
     try:
-        metadata = json.loads(result.stdout.strip().splitlines()[-1])
+        # The Java bridge emits a safe JSON diagnostic before exiting non-zero.
+        # Parse stdout first so its reason code is not discarded.
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        metadata = json.loads(lines[-1])
     except (ValueError, IndexError, json.JSONDecodeError):
-        LOG.warning("NewPipe extractor returned invalid metadata")
-        raise ValueError("تعذّر قراءة بيانات الفيديو المستخرجة.")
+        LOG.warning("NewPipe extractor returned invalid metadata (exit=%d)", result.returncode)
+        raise ValueError("تعذّر قراءة نتيجة محرك YouTube. راجع سجل التشخيص.")
+    if result.returncode and metadata.get("ok"):
+        LOG.warning("NewPipe extractor exited non-zero despite success metadata")
+        raise ValueError("تعذّر تأكيد نتيجة استخراج YouTube.")
     if not metadata.get("ok"):
         reason = metadata.get("reason", "extractor_error")
         LOG.warning("NewPipe extraction failed (reason=%s)", reason)
@@ -195,6 +199,8 @@ def download_youtube(url, folder):
             "source_rate_limited": "YouTube فرض حدًا مؤقتًا على الطلبات. انتظر قليلًا قبل المحاولة.",
             "source_forbidden": "YouTube رفض طلب الوصول إلى مسار الفيديو.",
             "no_compatible_stream_under_limit": "لم نجد جودة MP4 متوافقة ضمن حد 45 MB.",
+            "extractor_error": "NewPipe لم يتمكن من استخراج بيانات الفيديو. نحتاج رمز الخطأ التفصيلي من السجل.",
+            "youtube_unavailable": "الفيديو غير متاح عبر NewPipe من هذا السيرفر.",
         }
         raise ValueError(messages.get(reason, "تعذّر استخراج الفيديو من YouTube."))
     video_url = metadata.get("video_url")
