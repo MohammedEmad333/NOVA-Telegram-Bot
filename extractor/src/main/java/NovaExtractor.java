@@ -154,7 +154,7 @@ public final class NovaExtractor {
                     muxed.add(stream);
                 }
             }
-            muxed.sort(Comparator.comparingInt(v -> heightOf(v.getResolution())).reversed());
+            muxed.sort(Comparator.comparingInt((VideoStream v) -> heightOf(v.getResolution())).reversed());
             for (VideoStream video : muxed) {
                 long size = sizeOf(video);
                 if (heightOf(video.getResolution()) <= 720 && (size < 0 || size <= MAX_BYTES)) {
