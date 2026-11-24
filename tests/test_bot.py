@@ -103,6 +103,45 @@ class SecurityTests(unittest.TestCase):
             self.assertEqual(result.name, "nova-audio.mp3")
             self.assertEqual(result.read_bytes(), b"mp3-data")
 
+    def test_x_broadcast_url_is_recognized_only_on_trusted_hosts(self):
+        self.assertTrue(bot.is_x_broadcast_url(
+            "https://x.com/i/broadcasts/1jMJgkRXbqmJL"
+        ))
+        self.assertTrue(bot.is_x_broadcast_url(
+            "https://twitter.com/i/broadcasts/1jMJgkRXbqmJL"
+        ))
+        self.assertFalse(bot.is_x_broadcast_url(
+            "https://x.com/i/web/status/123"
+        ))
+        self.assertFalse(bot.is_x_broadcast_url(
+            "https://x.com.evil.test/i/broadcasts/123"
+        ))
+        self.assertFalse(bot.is_x_broadcast_url(
+            "http://x.com/i/broadcasts/123"
+        ))
+
+    def test_x_broadcast_download_prefers_480p_and_enforces_size_flag(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            args = bot.x_broadcast_download_args(
+                "https://x.com/i/broadcasts/123", Path(directory)
+            )
+        self.assertIn("best[height<=480]/best[height<=720]/best", args)
+        self.assertIn("--max-filesize", args)
+        self.assertIn(str(bot.MAX_BYTES), args)
+        self.assertIn("--merge-output-format", args)
+        self.assertIn("mp4", args)
+
+    def test_folder_bytes_counts_partial_and_final_outputs(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "video.mp4.part").write_bytes(b"1234")
+            (root / "video.mp4").write_bytes(b"567")
+            self.assertEqual(bot._folder_bytes(root), 7)
+
     def test_parse_message(self):
         self.assertEqual(bot.extract_url("Hi https://youtu.be/123."), "https://youtu.be/123")
         self.assertIsNone(bot.extract_url("nothing"))
