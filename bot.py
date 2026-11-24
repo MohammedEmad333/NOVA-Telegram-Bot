@@ -6,6 +6,7 @@ import sys
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -157,6 +158,14 @@ def classify_ytdlp_error(stderr):
         (("no video could be found in this tweet", "no video found in this tweet"),
          ("no_video_in_post",
           "لم يعثر X على فيديو مرفق بهذا المنشور. قد يكون المنشور نصًا أو صورة أو رابطًا خارجيًا، أو أن بيانات الفيديو غير متاحة للعامة. جرّب منشورًا يحتوي فيديو مرفقًا مباشرةً.")),
+        (("this broadcast is no longer available", "broadcast is no longer available"),
+         ("broadcast_unavailable", "تسجيل بث X لم يعد متاحًا للإعادة من المصدر.")),
+        (("this broadcast has not yet started", "broadcast is scheduled to start"),
+         ("broadcast_not_started", "بث X لم يبدأ بعد، ولا يوجد تسجيل متاح للتنزيل.")),
+        (("geo-restricted", "not available in your country"),
+         ("source_geo_restricted", "تسجيل بث X غير متاح في منطقة السيرفر.")),
+        (("unable to download m3u8", "failed to download m3u8", "m3u8 download error"),
+         ("hls_unavailable", "تعذّر تنزيل مسار HLS الخاص ببث X.")),
         (("unsupported url",),
          ("unsupported_url", "هذا الرابط غير مدعوم من محرك التحميل.")),
         (("timed out", "timeout"),
@@ -327,6 +336,116 @@ def download(url, folder):
     return selected
 
 
+def is_x_broadcast_url(url):
+    """Recognize X/Twitter replay broadcast URLs, not ordinary video posts."""
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        trusted = (host == "x.com" or host.endswith(".x.com")
+                   or host == "twitter.com" or host.endswith(".twitter.com"))
+        return (parsed.scheme == "https" and trusted
+                and parsed.path.startswith("/i/broadcasts/"))
+    except ValueError:
+        return False
+
+
+def x_broadcast_download_args(url, folder):
+    """Prefer 480p replay HLS, fall back to <=720p, and cap the output."""
+    output = str(folder / "nova-x-broadcast.%(ext)s")
+    return [
+        "yt-dlp", "--ignore-config", "--no-playlist", "--no-progress",
+        "--no-warnings", "--no-cache-dir", "--no-part",
+        "--socket-timeout", "20", "--retries", "1", "--fragment-retries", "1",
+        "--max-filesize", str(MAX_BYTES), "--restrict-filenames",
+        "--format", "best[height<=480]/best[height<=720]/best",
+        "--merge-output-format", "mp4",
+        "--output", output, "--", url,
+    ]
+
+
+def _folder_bytes(folder):
+    total = 0
+    for item in folder.iterdir():
+        if item.is_file():
+            try:
+                total += item.stat().st_size
+            except FileNotFoundError:
+                pass
+    return total
+
+
+def _stop_download_process(process):
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=5)
+    except ProcessLookupError:
+        return
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=5)
+
+
+def download_x_broadcast(url, folder):
+    """Download an ended X broadcast replay with a hard on-disk size guard."""
+    args = x_broadcast_download_args(url, folder)
+    try:
+        with tempfile.TemporaryFile(mode="w+b") as error_output:
+            try:
+                process = subprocess.Popen(
+                    args, cwd=str(folder), stdout=subprocess.DEVNULL,
+                    stderr=error_output, start_new_session=True,
+                )
+            except OSError as exc:
+                LOG.warning("Could not start X broadcast downloader (%s)",
+                            type(exc).__name__)
+                raise ValueError("تعذّر تشغيل محرك تنزيل بث X.") from None
+
+            started = time.monotonic()
+            while process.poll() is None:
+                if _folder_bytes(folder) > MAX_BYTES:
+                    _stop_download_process(process)
+                    raise ValueError(
+                        "حجم تسجيل البث تجاوز حد 45MB. لم نرسل ملفًا جزئيًا."
+                    )
+                if time.monotonic() - started >= DOWNLOAD_TIMEOUT:
+                    _stop_download_process(process)
+                    raise ValueError(
+                        "انتهت مهلة تنزيل تسجيل X. جرّب تسجيلًا أقصر."
+                    )
+                time.sleep(0.25)
+
+            if _folder_bytes(folder) > MAX_BYTES:
+                raise ValueError(
+                    "حجم تسجيل البث تجاوز حد 45MB. لم نرسل ملفًا جزئيًا."
+                )
+
+            if process.returncode:
+                error_output.seek(0)
+                stderr = error_output.read(16384).decode("utf-8", "replace")
+                reason, user_message = classify_ytdlp_error(stderr)
+                LOG.warning("X broadcast download failed (exit=%d, reason=%s)",
+                            process.returncode, reason)
+                raise ValueError(user_message)
+    except subprocess.TimeoutExpired:
+        raise ValueError("انتهت مهلة تنزيل تسجيل X. جرّب تسجيلًا أقصر.") from None
+
+    videos = [p for p in folder.iterdir() if p.is_file()
+              and p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")]
+    if len(videos) != 1:
+        LOG.warning("X broadcast completed without a single video output")
+        raise ValueError("لم يتم إنشاء ملف فيديو صالح من تسجيل X.")
+    selected = videos[0]
+    if not 0 < selected.stat().st_size <= MAX_BYTES:
+        raise ValueError("حجم تسجيل X يتجاوز حد الإرسال البالغ 45MB.")
+    LOG.info("X broadcast replay ready (bytes=%d)", selected.stat().st_size)
+    return selected
+
+
 def download_audio(url, folder):
     """Download one permitted SoundCloud track as bounded MP3 audio."""
     output = str(folder / "nova-audio.%(ext)s")
@@ -456,6 +575,10 @@ def handle(update):
             file_path = download_audio(url, folder)
             send_audio(chat_id, file_path)
             safe_send(chat_id, "اكتمل إرسال الصوت ✅")
+        elif is_x_broadcast_url(url):
+            file_path = download_x_broadcast(url, folder)
+            send_video(chat_id, file_path)
+            safe_send(chat_id, "اكتمل إرسال تسجيل البث ✅")
         else:
             if host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be":
                 file_path = download_youtube(url, folder)
