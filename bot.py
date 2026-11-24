@@ -491,9 +491,15 @@ def download_x_status(url, folder):
             "Accept-Encoding": "identity",
         })
         written = 0
+        started = time.monotonic()
         try:
             with urlopen(request, timeout=45) as response, output.open("wb") as target:
+                declared = response.headers.get("Content-Length")
+                if declared and declared.isdigit() and int(declared) > MAX_BYTES:
+                    raise ValueError("حجم فيديو X يتجاوز حد 45MB.")
                 while True:
+                    if time.monotonic() - started > DOWNLOAD_TIMEOUT:
+                        raise ValueError("انتهت مهلة تنزيل فيديو X.")
                     chunk = response.read(256 * 1024)
                     if not chunk:
                         break
@@ -521,16 +527,31 @@ def download_x_status(url, folder):
             "--", manifest_url,
         ]
         try:
-            result = subprocess.run(args, cwd=str(folder), stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.PIPE, timeout=DOWNLOAD_TIMEOUT,
-                                    check=False, text=True)
+            with tempfile.TemporaryFile(mode="w+b") as error_output:
+                process = subprocess.Popen(
+                    args, cwd=str(folder), stdout=subprocess.DEVNULL,
+                    stderr=error_output, start_new_session=True,
+                )
+                started = time.monotonic()
+                while process.poll() is None:
+                    if _folder_bytes(folder) > MAX_BYTES:
+                        _stop_download_process(process)
+                        raise ValueError("حجم فيديو HLS من X تجاوز حد 45MB.")
+                    if time.monotonic() - started >= DOWNLOAD_TIMEOUT:
+                        _stop_download_process(process)
+                        raise ValueError("انتهت مهلة تنزيل HLS من X.")
+                    time.sleep(0.25)
+                if _folder_bytes(folder) > MAX_BYTES:
+                    raise ValueError("حجم فيديو HLS من X تجاوز حد 45MB.")
+                if process.returncode:
+                    error_output.seek(0)
+                    stderr = error_output.read(16384).decode("utf-8", "replace")
+                    reason, message = classify_ytdlp_error(stderr)
+                    LOG.warning("X HLS download failed (exit=%d, reason=%s)",
+                                process.returncode, reason)
+                    raise ValueError(message)
         except subprocess.TimeoutExpired:
             raise ValueError("انتهت مهلة تنزيل HLS من X.") from None
-        if result.returncode:
-            reason, message = classify_ytdlp_error(result.stderr)
-            LOG.warning("X HLS download failed (exit=%d, reason=%s)",
-                        result.returncode, reason)
-            raise ValueError(message)
         videos = [p for p in folder.iterdir() if p.is_file()
                   and p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")]
         if len(videos) != 1 or not 0 < videos[0].stat().st_size <= MAX_BYTES:
