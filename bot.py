@@ -861,6 +861,8 @@ def main():
             or not 30 <= UPLOAD_TIMEOUT <= 7200):
         raise SystemExit("Invalid resource limits for the configured Telegram API mode")
     WORKDIR.mkdir(parents=True, exist_ok=True)
+    if LOCAL_API_MODE:
+        os.chmod(WORKDIR, 0o750)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     LOG.info("NOVA private bot starting, max video size %s MB", MAX_MB)
     offset = None
