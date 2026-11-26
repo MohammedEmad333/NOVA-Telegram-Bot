@@ -198,6 +198,80 @@ class SecurityTests(unittest.TestCase):
             (root / "video.mp4").write_bytes(b"567")
             self.assertEqual(bot._folder_bytes(root), 7)
 
+    def test_local_api_connection_uses_private_compose_service(self):
+        with patch.object(bot, "API_BASE_URL", "http://telegram-bot-api:8081"):
+            connection, base_path = bot._api_connection(timeout=7)
+            try:
+                self.assertEqual(connection.host, "telegram-bot-api")
+                self.assertEqual(connection.port, 8081)
+                self.assertEqual(base_path, "")
+                self.assertEqual(connection.timeout, 7)
+            finally:
+                connection.close()
+
+    def test_local_file_upload_passes_shared_file_uri_to_api(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nova.mp4"
+            path.write_bytes(b"test-video")
+            with patch.object(bot, "api_call", return_value={"message_id": 42}) as api:
+                result = bot._send_local_file(12345, path, "sendDocument", "document")
+            self.assertEqual(result, {"message_id": 42})
+            args, kwargs = api.call_args
+            self.assertEqual(args[0], "sendDocument")
+            self.assertEqual(args[1]["chat_id"], 12345)
+            self.assertTrue(args[1]["document"].startswith("file://"))
+            self.assertEqual(kwargs["timeout"], bot.UPLOAD_TIMEOUT)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o750)
+
+    def test_cloud_api_connection_keeps_standard_endpoint_by_default(self):
+        with patch.object(bot, "API_BASE_URL", "https://api.telegram.org"):
+            connection, base_path = bot._api_connection(timeout=9)
+            try:
+                self.assertEqual(connection.host, "api.telegram.org")
+                self.assertEqual(base_path, "")
+            finally:
+                connection.close()
+
+    def test_local_api_connection_uses_private_compose_service(self):
+        with patch.object(bot, "API_BASE_URL", "http://telegram-bot-api:8081"):
+            connection, base_path = bot._api_connection(timeout=7)
+            try:
+                self.assertEqual(connection.host, "telegram-bot-api")
+                self.assertEqual(connection.port, 8081)
+                self.assertEqual(base_path, "")
+                self.assertEqual(connection.timeout, 7)
+            finally:
+                connection.close()
+
+    def test_local_file_upload_passes_shared_file_uri_to_api(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nova.mp4"
+            path.write_bytes(b"test-video")
+            with patch.object(bot, "api_call", return_value={"message_id": 42}) as api:
+                result = bot._send_local_file(12345, path, "sendDocument", "document")
+            self.assertEqual(result, {"message_id": 42})
+            args, kwargs = api.call_args
+            self.assertEqual(args[0], "sendDocument")
+            self.assertEqual(args[1]["chat_id"], 12345)
+            self.assertTrue(args[1]["document"].startswith("file://"))
+            self.assertEqual(kwargs["timeout"], bot.UPLOAD_TIMEOUT)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o750)
+
+    def test_cloud_api_connection_keeps_standard_endpoint_by_default(self):
+        with patch.object(bot, "API_BASE_URL", "https://api.telegram.org"):
+            connection, base_path = bot._api_connection(timeout=9)
+            try:
+                self.assertEqual(connection.host, "api.telegram.org")
+                self.assertEqual(base_path, "")
+            finally:
+                connection.close()
+
     def test_parse_message(self):
         self.assertEqual(bot.extract_url("Hi https://youtu.be/123."), "https://youtu.be/123")
         self.assertIsNone(bot.extract_url("nothing"))

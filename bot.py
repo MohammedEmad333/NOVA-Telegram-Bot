@@ -18,11 +18,19 @@ from urllib.request import Request, urlopen
 LOG = logging.getLogger("nova")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ALLOWED_RAW = os.environ.get("TELEGRAM_ALLOWED_USER_IDS", "")
-MAX_MB = int(os.environ.get("MAX_VIDEO_MB", "45"))
+CLOUD_API_BASE_URL = "https://api.telegram.org"
+API_BASE_URL = os.environ.get("TELEGRAM_API_BASE_URL", CLOUD_API_BASE_URL).rstrip("/")
+LOCAL_API_MODE = os.environ.get("TELEGRAM_LOCAL_API", "false").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+MAX_SAFE_MB = 1800 if LOCAL_API_MODE else 45
+MAX_MB = int(os.environ.get(
+    "MAX_VIDEO_MB", "500" if LOCAL_API_MODE else "45"
+))
 MAX_BYTES = MAX_MB * 1024 * 1024
-DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT_SECONDS", "900"))
+DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT_SECONDS", "1800"))
+UPLOAD_TIMEOUT = int(os.environ.get("TELEGRAM_UPLOAD_TIMEOUT_SECONDS", "1800"))
 WORKDIR = Path(os.environ.get("WORKDIR", "/downloads"))
-API_HOST = "api.telegram.org"
 URL_RE = re.compile(r"https?://[^\s<>]+", re.I)
 SUPPORTED = ("youtube.com", "youtu.be", "youtube-nocookie.com", "soundcloud.com", "x.com", "twitter.com")
 
@@ -91,9 +99,10 @@ def polling_delay(status, errors, retry_after=None):
     return fallback
 
 
-def api_call(method, params=None, timeout=45):
+def api_call(method, params=None, timeout=45, base_url=None):
     payload = json.dumps(params or {}).encode()
-    req = Request("https://" + API_HOST + "/bot" + TOKEN + "/" + method,
+    endpoint = (base_url or API_BASE_URL).rstrip("/")
+    req = Request(endpoint + "/bot" + TOKEN + "/" + method,
                   data=payload, headers={"Content-Type": "application/json"})
     try:
         with urlopen(req, timeout=timeout) as response:
@@ -220,7 +229,7 @@ def download_youtube(url, folder):
             "login_required": "المصدر يتطلب تسجيل دخول فعلًا، والبوت لا يستخدم حسابات أو Cookies.",
             "source_rate_limited": "YouTube فرض حدًا مؤقتًا على الطلبات. انتظر قليلًا قبل المحاولة.",
             "source_forbidden": "YouTube رفض طلب الوصول إلى مسار الفيديو.",
-            "no_compatible_stream_under_limit": "لم نجد جودة MP4 متوافقة ضمن حد 45 MB.",
+            "no_compatible_stream_under_limit": f"لم نجد جودة MP4 متوافقة ضمن حد {MAX_MB} MB.",
             "extractor_error": "NewPipe لم يتمكن من استخراج بيانات الفيديو. نحتاج رمز الخطأ التفصيلي من السجل.",
             "youtube_unavailable": "الفيديو غير متاح عبر NewPipe من هذا السيرفر.",
         }
@@ -233,7 +242,7 @@ def download_youtube(url, folder):
         raise ValueError("لم يتم العثور على رابط صوت صالح.")
     estimated = int(metadata.get("video_bytes") or 0) + int(metadata.get("audio_bytes") or 0)
     if estimated > 0 and estimated > MAX_BYTES:
-        raise ValueError("حجم الفيديو يتجاوز حد الإرسال البالغ 45 MB.")
+        raise ValueError(f"حجم الفيديو يتجاوز حد الإرسال البالغ {MAX_MB} MB.")
 
     video_path = folder / "nova-video.mp4"
     audio_path = folder / "nova-audio.m4a"
@@ -283,7 +292,7 @@ def download_youtube(url, folder):
 
     final_size = output_path.stat().st_size
     if not 0 < final_size <= MAX_BYTES:
-        raise ValueError("الملف النهائي أكبر من حد الإرسال البالغ 45 MB.")
+        raise ValueError(f"الملف النهائي أكبر من حد الإرسال البالغ {MAX_MB} MB.")
     LOG.info("NewPipe download ready (resolution=%s, bytes=%d)",
              metadata.get("resolution", "unknown"), final_size)
     return output_path
@@ -496,7 +505,7 @@ def download_x_status(url, folder):
             with urlopen(request, timeout=45) as response, output.open("wb") as target:
                 declared = response.headers.get("Content-Length")
                 if declared and declared.isdigit() and int(declared) > MAX_BYTES:
-                    raise ValueError("حجم فيديو X يتجاوز حد 45MB.")
+                    raise ValueError(f"حجم فيديو X يتجاوز حد {MAX_MB}MB.")
                 while True:
                     if time.monotonic() - started > DOWNLOAD_TIMEOUT:
                         raise ValueError("انتهت مهلة تنزيل فيديو X.")
@@ -505,7 +514,7 @@ def download_x_status(url, folder):
                         break
                     written += len(chunk)
                     if written > MAX_BYTES:
-                        raise ValueError("حجم فيديو X تجاوز حد 45MB.")
+                        raise ValueError(f"حجم فيديو X تجاوز حد {MAX_MB}MB.")
                     target.write(chunk)
         except Exception:
             output.unlink(missing_ok=True)
@@ -536,13 +545,13 @@ def download_x_status(url, folder):
                 while process.poll() is None:
                     if _folder_bytes(folder) > MAX_BYTES:
                         _stop_download_process(process)
-                        raise ValueError("حجم فيديو HLS من X تجاوز حد 45MB.")
+                        raise ValueError(f"حجم فيديو HLS من X تجاوز حد {MAX_MB}MB.")
                     if time.monotonic() - started >= DOWNLOAD_TIMEOUT:
                         _stop_download_process(process)
                         raise ValueError("انتهت مهلة تنزيل HLS من X.")
                     time.sleep(0.25)
                 if _folder_bytes(folder) > MAX_BYTES:
-                    raise ValueError("حجم فيديو HLS من X تجاوز حد 45MB.")
+                    raise ValueError(f"حجم فيديو HLS من X تجاوز حد {MAX_MB}MB.")
                 if process.returncode:
                     error_output.seek(0)
                     stderr = error_output.read(16384).decode("utf-8", "replace")
@@ -555,7 +564,7 @@ def download_x_status(url, folder):
         videos = [p for p in folder.iterdir() if p.is_file()
                   and p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")]
         if len(videos) != 1 or not 0 < videos[0].stat().st_size <= MAX_BYTES:
-            raise ValueError("ملف فيديو X غير صالح أو يتجاوز حد 45MB.")
+            raise ValueError(f"ملف فيديو X غير صالح أو يتجاوز حد {MAX_MB}MB.")
         return videos[0]
     raise ValueError("لم يعثر X على مسار فيديو مدعوم.")
 
@@ -634,7 +643,7 @@ def download_x_broadcast(url, folder):
                 if _folder_bytes(folder) > MAX_BYTES:
                     _stop_download_process(process)
                     raise ValueError(
-                        "حجم تسجيل البث تجاوز حد 45MB. لم نرسل ملفًا جزئيًا."
+                        f"حجم تسجيل البث تجاوز حد {MAX_MB}MB. لم نرسل ملفًا جزئيًا."
                     )
                 if time.monotonic() - started >= DOWNLOAD_TIMEOUT:
                     _stop_download_process(process)
@@ -645,7 +654,7 @@ def download_x_broadcast(url, folder):
 
             if _folder_bytes(folder) > MAX_BYTES:
                 raise ValueError(
-                    "حجم تسجيل البث تجاوز حد 45MB. لم نرسل ملفًا جزئيًا."
+                    f"حجم تسجيل البث تجاوز حد {MAX_MB}MB. لم نرسل ملفًا جزئيًا."
                 )
 
             if process.returncode:
@@ -665,7 +674,7 @@ def download_x_broadcast(url, folder):
         raise ValueError("لم يتم إنشاء ملف فيديو صالح من تسجيل X.")
     selected = videos[0]
     if not 0 < selected.stat().st_size <= MAX_BYTES:
-        raise ValueError("حجم تسجيل X يتجاوز حد الإرسال البالغ 45MB.")
+        raise ValueError(f"حجم تسجيل X يتجاوز حد الإرسال البالغ {MAX_MB}MB.")
     LOG.info("X broadcast replay ready (bytes=%d)", selected.stat().st_size)
     return selected
 
@@ -704,66 +713,83 @@ def download_audio(url, folder):
     return selected
 
 
-def send_video(chat_id, path):
-    """Stream multipart upload without buffering the entire video in RAM."""
+def _api_connection(timeout):
+    endpoint = urlsplit(API_BASE_URL)
+    if endpoint.scheme not in ("http", "https") or not endpoint.hostname:
+        raise RuntimeError("Invalid Telegram API base URL")
+    connection_type = (http.client.HTTPSConnection if endpoint.scheme == "https"
+                       else http.client.HTTPConnection)
+    connection = connection_type(endpoint.hostname, endpoint.port, timeout=timeout)
+    base_path = endpoint.path.rstrip("/")
+    return connection, base_path
+
+
+def _send_multipart_cloud(chat_id, path, method, field, filename, content_type):
+    """Stream a file to the standard cloud Bot API without loading it into RAM."""
     boundary = "nova_boundary_8d7e6f21"
     head = (
         "--" + boundary + "\r\n"
         'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
         + str(chat_id) + "\r\n"
         "--" + boundary + "\r\n"
-        'Content-Disposition: form-data; name="document"; filename="nova' + path.suffix.lower() + '"\r\n'
-        "Content-Type: application/octet-stream\r\n\r\n"
+        'Content-Disposition: form-data; name="' + field + '"; filename="' + filename + '"\r\n'
+        "Content-Type: " + content_type + "\r\n\r\n"
     ).encode()
     tail = ("\r\n--" + boundary + "--\r\n").encode()
-    conn = http.client.HTTPSConnection(API_HOST, timeout=180)
+    conn, base_path = _api_connection(timeout=180)
     try:
-        conn.putrequest("POST", "/bot" + TOKEN + "/sendDocument")
+        conn.putrequest("POST", base_path + "/bot" + TOKEN + "/" + method)
         conn.putheader("Content-Type", "multipart/form-data; boundary=" + boundary)
         conn.putheader("Content-Length", str(len(head) + path.stat().st_size + len(tail)))
         conn.endheaders()
         conn.send(head)
-        with path.open("rb") as f:
-            while data := f.read(256 * 1024):
+        with path.open("rb") as source:
+            while data := source.read(256 * 1024):
                 conn.send(data)
         conn.send(tail)
         response = conn.getresponse()
         payload = response.read(8192)
-        if response.status != 200 or not json.loads(payload).get("ok"):
+        result = json.loads(payload)
+        if response.status != 200 or not result.get("ok"):
             raise RuntimeError("Telegram upload rejected")
+        return result.get("result")
     finally:
         conn.close()
+
+
+def _send_local_file(chat_id, path, method, field):
+    """Ask the local Bot API container to read a shared file:// path directly."""
+    resolved = path.resolve(strict=True)
+    if not resolved.is_file():
+        raise RuntimeError("Telegram upload path is not a regular file")
+    # The API container runs as uid 101 and receives gid 10001 as a supplemental
+    # group. Keep the job directory traversable and the file group-readable.
+    os.chmod(resolved.parent, 0o750)
+    os.chmod(resolved, 0o640)
+    return api_call(
+        method,
+        {"chat_id": chat_id, field: resolved.as_uri()},
+        timeout=UPLOAD_TIMEOUT,
+    )
+
+
+def send_video(chat_id, path):
+    """Send a video/document through cloud multipart or local file URI."""
+    if LOCAL_API_MODE:
+        return _send_local_file(chat_id, path, "sendDocument", "document")
+    return _send_multipart_cloud(
+        chat_id, path, "sendDocument", "document",
+        "nova" + path.suffix.lower(), "application/octet-stream",
+    )
 
 
 def send_audio(chat_id, path):
-    """Stream an MP3 upload through Telegram's audio endpoint."""
-    boundary = "nova_audio_boundary_6a1f9c42"
-    head = (
-        "--" + boundary + "\r\n"
-        'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
-        + str(chat_id) + "\r\n"
-        "--" + boundary + "\r\n"
-        'Content-Disposition: form-data; name="audio"; filename="nova.mp3"\r\n'
-        "Content-Type: audio/mpeg\r\n\r\n"
-    ).encode()
-    tail = ("\r\n--" + boundary + "--\r\n").encode()
-    conn = http.client.HTTPSConnection(API_HOST, timeout=180)
-    try:
-        conn.putrequest("POST", "/bot" + TOKEN + "/sendAudio")
-        conn.putheader("Content-Type", "multipart/form-data; boundary=" + boundary)
-        conn.putheader("Content-Length", str(len(head) + path.stat().st_size + len(tail)))
-        conn.endheaders()
-        conn.send(head)
-        with path.open("rb") as f:
-            while data := f.read(256 * 1024):
-                conn.send(data)
-        conn.send(tail)
-        response = conn.getresponse()
-        payload = response.read(8192)
-        if response.status != 200 or not json.loads(payload).get("ok"):
-            raise RuntimeError("Telegram audio upload rejected")
-    finally:
-        conn.close()
+    """Send an MP3 through cloud multipart or local file URI."""
+    if LOCAL_API_MODE:
+        return _send_local_file(chat_id, path, "sendAudio", "audio")
+    return _send_multipart_cloud(
+        chat_id, path, "sendAudio", "audio", "nova.mp3", "audio/mpeg",
+    )
 
 
 def handle(update):
@@ -826,9 +852,17 @@ def handle(update):
 def main():
     if not TOKEN or ":" not in TOKEN or not allowed_ids():
         raise SystemExit("Set TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USER_IDS before startup")
-    if not 1 <= MAX_MB <= 45 or not 30 <= DOWNLOAD_TIMEOUT <= 3600:
-        raise SystemExit("Invalid resource limits")
+    endpoint = urlsplit(API_BASE_URL)
+    if (endpoint.scheme not in ("http", "https") or not endpoint.hostname
+            or endpoint.username is not None or endpoint.password is not None):
+        raise SystemExit("Invalid TELEGRAM_API_BASE_URL")
+    if (not 1 <= MAX_MB <= MAX_SAFE_MB
+            or not 30 <= DOWNLOAD_TIMEOUT <= 7200
+            or not 30 <= UPLOAD_TIMEOUT <= 7200):
+        raise SystemExit("Invalid resource limits for the configured Telegram API mode")
     WORKDIR.mkdir(parents=True, exist_ok=True)
+    if LOCAL_API_MODE:
+        os.chmod(WORKDIR, 0o750)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     LOG.info("NOVA private bot starting, max video size %s MB", MAX_MB)
     offset = None
@@ -862,6 +896,7 @@ def diagnose():
     try:
         result = api_call("getMe", timeout=15)
         print("Telegram getMe: OK")
+        print("API mode:", "local" if LOCAL_API_MODE else "cloud")
         print("Username:", (result or {}).get("username", "unknown"))
     except TelegramApiError as exc:
         print("Telegram getMe: HTTP", exc.status)
@@ -873,8 +908,42 @@ def diagnose():
         raise SystemExit(1)
 
 
+def logout_cloud():
+    """Deregister the bot from api.telegram.org before first local-mode login."""
+    try:
+        result = api_call("logOut", timeout=15, base_url=CLOUD_API_BASE_URL)
+        if result is not True:
+            raise ValueError("Telegram cloud logOut did not return true")
+        print("Telegram cloud logOut: OK")
+    except TelegramApiError as exc:
+        print("Telegram cloud logOut: HTTP", exc.status)
+        if exc.retry_after is not None:
+            print("Telegram retry_after (seconds):", exc.retry_after)
+        raise SystemExit(1)
+
+
+def logout_local():
+    """Deregister the bot from the configured local API before a cloud rollback."""
+    if not LOCAL_API_MODE:
+        raise SystemExit("TELEGRAM_LOCAL_API must be true to log out of the local API")
+    try:
+        result = api_call("logOut", timeout=15)
+        if result is not True:
+            raise ValueError("Local Telegram API logOut did not return true")
+        print("Telegram local logOut: OK")
+    except TelegramApiError as exc:
+        print("Telegram local logOut: HTTP", exc.status)
+        if exc.retry_after is not None:
+            print("Telegram retry_after (seconds):", exc.retry_after)
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] == "--check-telegram":
         diagnose()
+    elif len(sys.argv) == 2 and sys.argv[1] == "--logout-cloud":
+        logout_cloud()
+    elif len(sys.argv) == 2 and sys.argv[1] == "--logout-local":
+        logout_local()
     else:
         main()

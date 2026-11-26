@@ -12,12 +12,12 @@ Official Telegram bot: **[@NovaOrbitDLBot](https://t.me/NovaOrbitDLBot)**. This 
 - Ordinary public X posts use the same FxTwitter/vxTwitter public metadata fallback as the NOVA Android app, validating `video.twimg.com` MP4/HLS URLs before download. X Broadcast replays use a separate bounded HLS path.
 - Ended X Broadcast replays use a dedicated HLS path, prefer up to 480p, enforce the 45 MiB temporary/final output ceiling, and upload as MP4 documents. Ordinary X posts continue through the standard extractor.
 - YouTube selects a compatible MP4 stream at or below 720p, preferring separate video + M4A audio and merging with FFmpeg without re-encoding. A progressive MP4 fallback is used when needed.
-- Up to 720p where available, one active download/upload at a time, 45 MiB final file limit. Larger videos are rejected.
+- Up to 720p where available, one active download/upload at a time. Local Bot API mode starts with a 500 MiB configurable file cap; the Local Bot API itself supports files up to 2000 MB.
 - Temporary download files are deleted after each task. No user-provided cookies, account logins, DRM bypass or arbitrary-domain fetching.
-- Non-root Docker service, read-only filesystem, 768 MiB RAM / 1 vCPU, 256 MiB ephemeral download storage, bounded logs.
+- Non-root NOVA worker and private Local Bot API service on an internal Docker network. Downloads use a persistent disk volume shared with the API service; the API service is not published on a public host port.
 - Unit tests, CI, and no tokens stored in Git.
 
-**Scope:** Direct MP4 from arbitrary sites, MEGA, Witanime, playlists, interactive quality selection and Telegram Local Bot API are **not yet implemented**. The initial bot does **not** expose the whole Android NOVA feature set. Downloads should be limited to content you have permission to save.
+**Scope:** Direct MP4 from arbitrary sites, MEGA, Witanime, playlists and interactive quality selection are **not yet implemented**. The Local Bot API is included for large uploads; it does not expand the list of supported media extractors. The initial bot does **not** expose the whole Android NOVA feature set. Downloads should be limited to content you have permission to save.
 
 ## Setup on Ubuntu (ARM64 supported)
 
@@ -48,9 +48,68 @@ Stop the bot with `docker compose down`. Updates: `git pull --ff-only && docker 
 
 ## Resource policy
 
-The default standard Telegram Bot API supports uploads up to 50 MB; the MVP caps output at 45 MiB to leave margin. `/downloads` is a 256 MiB **tmpfs** (RAM-backed) mounted into the container, so it competes with available host memory even though container `mem_limit` may not fully account for all charged pages. Review Docker memory and disk behavior under real traffic before raising limits. The initial bot only supports private chats and ignores group messages. A single task runs synchronously; new messages wait for the current task, with no durable queue. Requests interrupted by process restart are not resumed.
+Local Bot API mode is enabled for this deployment. Telegram's local server supports uploads up to 2000 MB; NOVA deliberately starts at 500 MiB. `MAX_VIDEO_MB` can be raised up to 1800 MiB in the bot configuration, subject to available disk space, Telegram's limit and end-to-end testing. `/downloads` is a persistent Docker volume on the host disk, shared with the Local Bot API process for `file://` uploads; it is no longer a RAM-backed tmpfs. The API server's own state is stored in a separate persistent volume. The bot and API containers have bounded CPU/RAM and only one task runs at a time. Check free disk space before increasing the cap. The initial bot only supports private chats and ignores group messages. A single task runs synchronously; new messages wait for the current task, with no durable queue. Requests interrupted by process restart are not resumed.
 
 Do not expect hard guarantees from CPU quota alone. Avoid running heavy transcoding concurrently with production database workloads.
+
+## Local Telegram Bot API setup and migration
+
+The Compose stack uses the Telegram Bot API server through a multi-architecture image (`linux/arm64` and `linux/amd64`). Its HTTP ports are only exposed inside the Compose network; they are not published to the host or internet.
+
+1. Obtain the free `api_id` and `api_hash` from https://my.telegram.org. Add them to the server's private `.env` alongside the existing bot token and allowed user ID. Never commit or paste these credentials into GitHub or chat.
+2. Set these values in `.env`:
+
+```env
+TELEGRAM_API_ID=your_api_id
+TELEGRAM_API_HASH=your_api_hash
+TELEGRAM_API_BASE_URL=http://telegram-bot-api:8081
+TELEGRAM_LOCAL_API=true
+MAX_VIDEO_MB=500
+DOWNLOAD_TIMEOUT_SECONDS=1800
+TELEGRAM_UPLOAD_TIMEOUT_SECONDS=1800
+```
+
+3. Pull the reviewed release and build NOVA:
+
+```bash
+cd ~/NOVA-Telegram-Bot
+git pull --ff-only
+docker compose config --quiet
+docker compose build nova-bot
+```
+
+4. Stop the existing cloud-polling bot, start the private API service and initialize the shared disk volume:
+
+```bash
+docker compose stop nova-bot
+docker compose up -d telegram-bot-api downloads-init
+docker compose ps
+docker compose logs --tail=40 telegram-bot-api
+```
+
+5. Only after the local API container is healthy, deregister this bot from Telegram's cloud Bot API exactly once. This is required before moving the same bot token to the local server:
+
+```bash
+docker compose run --rm --no-deps nova-bot python bot.py --logout-cloud
+sleep 10
+docker compose up -d nova-bot
+docker compose logs --tail=50 nova-bot
+```
+
+6. Send `/start` and test with a small authorized media file first. Then increase test sizes gradually. The initial cap is 500 MiB, not the Local Bot API maximum.
+
+**Do not run the cloud and local pollers at the same time.** Do not run `--logout-cloud` repeatedly. If that command fails, leave NOVA stopped and inspect its numeric status before proceeding.
+
+### Rollback to the cloud Bot API
+
+Stop NOVA, call the local `logOut` once, then switch the `.env` values back to cloud mode before restarting:
+
+```bash
+docker compose stop nova-bot
+docker compose run --rm --no-deps nova-bot python bot.py --logout-local
+```
+
+Then set `TELEGRAM_LOCAL_API=false`, `TELEGRAM_API_BASE_URL=https://api.telegram.org`, and `MAX_VIDEO_MB=45` in `.env`, wait 10 seconds, and run `docker compose up -d nova-bot`. Keep the local API service and volumes until the cloud-mode bot has been verified.
 
 ## YouTube anonymous-access restrictions
 
