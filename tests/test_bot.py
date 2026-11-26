@@ -278,7 +278,7 @@ class SecurityTests(unittest.TestCase):
 
         def fake_run(args, **kwargs):
             self.assertIn("--concurrent-fragments", args)
-            self.assertEqual(args[args.index("--concurrent-fragments") + 1], "4")
+            self.assertEqual(args[args.index("--concurrent-fragments") + 1], "6")
             Path(kwargs["cwd"], "nova.mp4").write_bytes(b"video")
             class Result:
                 returncode = 0
@@ -298,7 +298,7 @@ class SecurityTests(unittest.TestCase):
                 "https://x.com/i/broadcasts/1234567890", Path(directory)
             )
         self.assertIn("--concurrent-fragments", args)
-        self.assertEqual(args[args.index("--concurrent-fragments") + 1], "4")
+        self.assertEqual(args[args.index("--concurrent-fragments") + 1], "6")
 
     def test_soundcloud_audio_uses_four_concurrent_fragments(self):
         import tempfile
@@ -306,7 +306,7 @@ class SecurityTests(unittest.TestCase):
 
         def fake_run(args, **kwargs):
             self.assertIn("--concurrent-fragments", args)
-            self.assertEqual(args[args.index("--concurrent-fragments") + 1], "4")
+            self.assertEqual(args[args.index("--concurrent-fragments") + 1], "6")
             Path(kwargs["cwd"], "nova-audio.mp3").write_bytes(b"audio")
             class Result:
                 returncode = 0
