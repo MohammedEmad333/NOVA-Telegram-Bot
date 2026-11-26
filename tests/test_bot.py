@@ -272,6 +272,54 @@ class SecurityTests(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_generic_video_download_uses_bounded_hls_fragment_concurrency(self):
+        import tempfile
+        from pathlib import Path
+
+        def fake_run(args, **kwargs):
+            self.assertIn("--concurrent-fragments", args)
+            self.assertEqual(args[args.index("--concurrent-fragments") + 1], "4")
+            Path(kwargs["cwd"], "nova.mp4").write_bytes(b"video")
+            class Result:
+                returncode = 0
+                stderr = ""
+            return Result()
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(bot.subprocess, "run", side_effect=fake_run):
+            result = bot.download("https://x.com/example/video", Path(directory))
+        self.assertEqual(result.name, "nova.mp4")
+
+    def test_x_broadcast_uses_four_concurrent_fragments(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            args = bot.x_broadcast_download_args(
+                "https://x.com/i/broadcasts/1234567890", Path(directory)
+            )
+        self.assertIn("--concurrent-fragments", args)
+        self.assertEqual(args[args.index("--concurrent-fragments") + 1], "4")
+
+    def test_soundcloud_audio_uses_four_concurrent_fragments(self):
+        import tempfile
+        from pathlib import Path
+
+        def fake_run(args, **kwargs):
+            self.assertIn("--concurrent-fragments", args)
+            self.assertEqual(args[args.index("--concurrent-fragments") + 1], "4")
+            Path(kwargs["cwd"], "nova-audio.mp3").write_bytes(b"audio")
+            class Result:
+                returncode = 0
+                stderr = ""
+            return Result()
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(bot.subprocess, "run", side_effect=fake_run):
+            result = bot.download_audio(
+                "https://soundcloud.com/example/track", Path(directory)
+            )
+        self.assertEqual(result.name, "nova-audio.mp3")
+
     def test_parse_message(self):
         self.assertEqual(bot.extract_url("Hi https://youtu.be/123."), "https://youtu.be/123")
         self.assertIsNone(bot.extract_url("nothing"))
