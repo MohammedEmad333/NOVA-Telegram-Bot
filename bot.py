@@ -25,7 +25,7 @@ LOCAL_API_MODE = os.environ.get("TELEGRAM_LOCAL_API", "false").strip().lower() i
 )
 MAX_SAFE_MB = 1800 if LOCAL_API_MODE else 45
 MAX_MB = int(os.environ.get(
-    "MAX_VIDEO_MB", "500" if LOCAL_API_MODE else "45"
+    "MAX_VIDEO_MB", "1024" if LOCAL_API_MODE else "45"
 ))
 MAX_BYTES = MAX_MB * 1024 * 1024
 DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT_SECONDS", "1800"))
