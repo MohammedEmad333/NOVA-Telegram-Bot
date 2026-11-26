@@ -12,7 +12,7 @@ Official Telegram bot: **[@NovaOrbitDLBot](https://t.me/NovaOrbitDLBot)**. This 
 - Ordinary public X posts use the same FxTwitter/vxTwitter public metadata fallback as the NOVA Android app, validating `video.twimg.com` MP4/HLS URLs before download. X Broadcast replays use a separate bounded HLS path.
 - Ended X Broadcast replays use a dedicated HLS path, prefer up to 480p, enforce the 45 MiB temporary/final output ceiling, and upload as MP4 documents. Ordinary X posts continue through the standard extractor.
 - YouTube selects a compatible MP4 stream at or below 720p, preferring separate video + M4A audio and merging with FFmpeg without re-encoding. A progressive MP4 fallback is used when needed.
-- Up to 720p where available, one active download/upload at a time. Local Bot API mode starts with a 500 MiB configurable file cap; the Local Bot API itself supports files up to 2000 MB.
+- Up to 720p where available, one active download/upload at a time. Local Bot API mode starts with a 1 GiB (1024 MiB) configurable file cap; the Local Bot API itself supports files up to 2000 MB.
 - Temporary download files are deleted after each task. No user-provided cookies, account logins, DRM bypass or arbitrary-domain fetching.
 - Non-root NOVA worker and private Local Bot API service on an internal Docker network. Downloads use a persistent disk volume shared with the API service; the API service is not published on a public host port.
 - Unit tests, CI, and no tokens stored in Git.
@@ -48,7 +48,7 @@ Stop the bot with `docker compose down`. Updates: `git pull --ff-only && docker 
 
 ## Resource policy
 
-Local Bot API mode is enabled for this deployment. Telegram's local server supports uploads up to 2000 MB; NOVA deliberately starts at 500 MiB. `MAX_VIDEO_MB` can be raised up to 1800 MiB in the bot configuration, subject to available disk space, Telegram's limit and end-to-end testing. `/downloads` is a persistent Docker volume on the host disk, shared with the Local Bot API process for `file://` uploads; it is no longer a RAM-backed tmpfs. The API server's own state is stored in a separate persistent volume. The bot and API containers have bounded CPU/RAM and only one task runs at a time. Check free disk space before increasing the cap. The initial bot only supports private chats and ignores group messages. A single task runs synchronously; new messages wait for the current task, with no durable queue. Requests interrupted by process restart are not resumed.
+Local Bot API mode is enabled for this deployment. Telegram's local server supports uploads up to 2000 MB; NOVA deliberately starts at 1 GiB (1024 MiB). `MAX_VIDEO_MB` can be raised up to 1800 MiB in the bot configuration, subject to available disk space, Telegram's limit and end-to-end testing. `/downloads` is a persistent Docker volume on the host disk, shared with the Local Bot API process for `file://` uploads; it is no longer a RAM-backed tmpfs. The API server's own state is stored in a separate persistent volume. The bot and API containers have bounded CPU/RAM and only one task runs at a time. Check free disk space before increasing the cap. The initial bot only supports private chats and ignores group messages. A single task runs synchronously; new messages wait for the current task, with no durable queue. Requests interrupted by process restart are not resumed.
 
 Do not expect hard guarantees from CPU quota alone. Avoid running heavy transcoding concurrently with production database workloads.
 
@@ -64,7 +64,7 @@ TELEGRAM_API_ID=your_api_id
 TELEGRAM_API_HASH=your_api_hash
 TELEGRAM_API_BASE_URL=http://telegram-bot-api:8081
 TELEGRAM_LOCAL_API=true
-MAX_VIDEO_MB=500
+MAX_VIDEO_MB=1024
 DOWNLOAD_TIMEOUT_SECONDS=1800
 TELEGRAM_UPLOAD_TIMEOUT_SECONDS=1800
 ```
@@ -96,7 +96,7 @@ docker compose up -d nova-bot
 docker compose logs --tail=50 nova-bot
 ```
 
-6. Send `/start` and test with a small authorized media file first. Then increase test sizes gradually. The initial cap is 500 MiB, not the Local Bot API maximum.
+6. Send `/start` and test with a small authorized media file first. Then increase test sizes gradually. The initial cap is 1 GiB (1024 MiB), not the Local Bot API maximum.
 
 **Do not run the cloud and local pollers at the same time.** Do not run `--logout-cloud` repeatedly. If that command fails, leave NOVA stopped and inspect its numeric status before proceeding.
 
