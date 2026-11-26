@@ -53,8 +53,8 @@ services:
       - .env
     environment:
       WORKDIR: /downloads
-      TELEGRAM_API_BASE_URL: http://telegram-bot-api:8081
-      TELEGRAM_LOCAL_API: "true"
+      TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:-http://telegram-bot-api:8081}
+      TELEGRAM_LOCAL_API: ${TELEGRAM_LOCAL_API:-true}
     depends_on:
       telegram-bot-api:
         condition: service_healthy
