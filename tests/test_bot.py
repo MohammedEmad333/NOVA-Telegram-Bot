@@ -320,6 +320,21 @@ class SecurityTests(unittest.TestCase):
             )
         self.assertEqual(result.name, "nova-audio.mp3")
 
+    def test_download_throughput_log_reports_bytes_duration_and_mbps(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "media.mp4"
+            path.write_bytes(b"x" * 125000)
+            with patch.object(bot, "LOG") as logger:
+                bot.log_download_complete("x_broadcast", path, bot.time.monotonic() - 2)
+            message = logger.info.call_args.args[0]
+            self.assertIn("source=%s", message)
+            self.assertEqual(logger.info.call_args.args[1], "x_broadcast")
+            self.assertEqual(logger.info.call_args.args[2], 125000)
+            self.assertGreater(logger.info.call_args.args[3], 0)
+            self.assertGreater(logger.info.call_args.args[4], 0)
+
     def test_parse_message(self):
         self.assertEqual(bot.extract_url("Hi https://youtu.be/123."), "https://youtu.be/123")
         self.assertIsNone(bot.extract_url("nothing"))
