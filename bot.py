@@ -777,6 +777,14 @@ def _send_local_file(chat_id, path, method, field):
     )
 
 
+def log_download_complete(source, path, started):
+    """Log source-to-disk throughput separately from Telegram upload throughput."""
+    size = path.stat().st_size
+    elapsed = max(time.monotonic() - started, 0.001)
+    LOG.info("Media download complete (source=%s, bytes=%d, seconds=%.2f, Mbps=%.2f)",
+             source, size, elapsed, size * 8 / elapsed / 1_000_000)
+
+
 def send_video(chat_id, path):
     """Send a video/document and log the measured upload duration."""
     started = time.monotonic()
@@ -850,32 +858,51 @@ def handle(update):
         return
     safe_send(chat_id, "جاري تجهيز الفيديو…")
     folder = Path(tempfile.mkdtemp(prefix="nova-", dir=str(WORKDIR)))
+    download_started = time.monotonic()
+    source = "unknown"
     try:
         host = (urlsplit(url).hostname or "").lower()
         is_soundcloud = host == "soundcloud.com" or host.endswith(".soundcloud.com")
         if is_soundcloud:
+            source = "soundcloud"
+            LOG.info("Media download started (source=%s)", source)
             file_path = download_audio(url, folder)
+            log_download_complete(source, file_path, download_started)
             send_audio(chat_id, file_path)
             safe_send(chat_id, "اكتمل إرسال الصوت ✅")
         elif is_x_broadcast_url(url):
+            source = "x_broadcast"
+            LOG.info("Media download started (source=%s)", source)
             file_path = download_x_broadcast(url, folder)
+            log_download_complete(source, file_path, download_started)
             send_video(chat_id, file_path)
             safe_send(chat_id, "اكتمل إرسال تسجيل البث ✅")
         elif x_status_id(url):
+            source = "x_post"
+            LOG.info("Media download started (source=%s)", source)
             file_path = download_x_status(url, folder)
+            log_download_complete(source, file_path, download_started)
             send_video(chat_id, file_path)
             safe_send(chat_id, "اكتمل إرسال فيديو X ✅")
         else:
             if host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be":
+                source = "youtube"
+                LOG.info("Media download started (source=%s)", source)
                 file_path = download_youtube(url, folder)
             else:
+                source = "yt_dlp"
+                LOG.info("Media download started (source=%s)", source)
                 file_path = download(url, folder)
+            log_download_complete(source, file_path, download_started)
             send_video(chat_id, file_path)
             safe_send(chat_id, "اكتمل إرسال الفيديو ✅")
     except ValueError as exc:
+        LOG.warning("Media download/send stopped (source=%s, seconds=%.2f, reason=%s)",
+                    source, time.monotonic() - download_started, type(exc).__name__)
         safe_send(chat_id, str(exc))
     except (OSError, RuntimeError, json.JSONDecodeError) as exc:
-        LOG.exception("Download/send failure: %s", type(exc).__name__)
+        LOG.exception("Download/send failure (source=%s, seconds=%.2f): %s",
+                      source, time.monotonic() - download_started, type(exc).__name__)
         safe_send(chat_id, "حدث خطأ أثناء التحميل أو الإرسال. جرّب مرة أخرى لاحقًا.")
     finally:
         shutil.rmtree(folder, ignore_errors=True)
