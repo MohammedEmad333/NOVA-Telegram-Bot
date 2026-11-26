@@ -317,6 +317,7 @@ def download(url, folder):
         "yt-dlp", "--ignore-config", "--no-playlist", "--no-progress",
         "--no-warnings", "--no-cache-dir", "--no-part",
         "--socket-timeout", "20", "--retries", "2", "--fragment-retries", "2",
+        "--concurrent-fragments", "4",
         "--max-filesize", str(MAX_BYTES), "--restrict-filenames",
         "--format", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
         "--merge-output-format", "mp4",
@@ -531,6 +532,7 @@ def download_x_status(url, folder):
             "yt-dlp", "--ignore-config", "--no-playlist", "--no-progress",
             "--no-warnings", "--no-cache-dir", "--no-part",
             "--socket-timeout", "20", "--retries", "1", "--fragment-retries", "1",
+            "--concurrent-fragments", "4",
             "--max-filesize", str(MAX_BYTES), "--format", "best",
             "--merge-output-format", "mp4", "--output", str(folder / "nova-x.%(ext)s"),
             "--", manifest_url,
@@ -589,6 +591,7 @@ def x_broadcast_download_args(url, folder):
         "yt-dlp", "--ignore-config", "--no-playlist", "--no-progress",
         "--no-warnings", "--no-cache-dir", "--no-part",
         "--socket-timeout", "20", "--retries", "1", "--fragment-retries", "1",
+        "--concurrent-fragments", "4",
         "--max-filesize", str(MAX_BYTES), "--restrict-filenames",
         "--format", "best[height<=480]/best[height<=720]/best",
         "--merge-output-format", "mp4",
@@ -686,6 +689,7 @@ def download_audio(url, folder):
         "yt-dlp", "--ignore-config", "--no-playlist", "--no-progress",
         "--no-warnings", "--no-cache-dir", "--no-part",
         "--socket-timeout", "20", "--retries", "2", "--fragment-retries", "2",
+        "--concurrent-fragments", "4",
         "--max-filesize", str(MAX_BYTES), "--restrict-filenames",
         "--format", "bestaudio/best",
         "--extract-audio", "--audio-format", "mp3", "--audio-quality", "5",
@@ -774,22 +778,50 @@ def _send_local_file(chat_id, path, method, field):
 
 
 def send_video(chat_id, path):
-    """Send a video/document through cloud multipart or local file URI."""
-    if LOCAL_API_MODE:
-        return _send_local_file(chat_id, path, "sendDocument", "document")
-    return _send_multipart_cloud(
-        chat_id, path, "sendDocument", "document",
-        "nova" + path.suffix.lower(), "application/octet-stream",
-    )
+    """Send a video/document and log the measured upload duration."""
+    started = time.monotonic()
+    size = path.stat().st_size
+    try:
+        if LOCAL_API_MODE:
+            result = _send_local_file(chat_id, path, "sendDocument", "document")
+        else:
+            result = _send_multipart_cloud(
+                chat_id, path, "sendDocument", "document",
+                "nova" + path.suffix.lower(), "application/octet-stream",
+            )
+        elapsed = max(time.monotonic() - started, 0.001)
+        LOG.info("Telegram video upload complete (bytes=%d, seconds=%.2f, Mbps=%.2f, api=%s)",
+                 size, elapsed, size * 8 / elapsed / 1_000_000,
+                 "local" if LOCAL_API_MODE else "cloud")
+        return result
+    except Exception:
+        LOG.exception("Telegram video upload failed (bytes=%d, seconds=%.2f, api=%s)",
+                      size, time.monotonic() - started,
+                      "local" if LOCAL_API_MODE else "cloud")
+        raise
 
 
 def send_audio(chat_id, path):
-    """Send an MP3 through cloud multipart or local file URI."""
-    if LOCAL_API_MODE:
-        return _send_local_file(chat_id, path, "sendAudio", "audio")
-    return _send_multipart_cloud(
-        chat_id, path, "sendAudio", "audio", "nova.mp3", "audio/mpeg",
-    )
+    """Send an MP3 and log the measured upload duration."""
+    started = time.monotonic()
+    size = path.stat().st_size
+    try:
+        if LOCAL_API_MODE:
+            result = _send_local_file(chat_id, path, "sendAudio", "audio")
+        else:
+            result = _send_multipart_cloud(
+                chat_id, path, "sendAudio", "audio", "nova.mp3", "audio/mpeg",
+            )
+        elapsed = max(time.monotonic() - started, 0.001)
+        LOG.info("Telegram audio upload complete (bytes=%d, seconds=%.2f, Mbps=%.2f, api=%s)",
+                 size, elapsed, size * 8 / elapsed / 1_000_000,
+                 "local" if LOCAL_API_MODE else "cloud")
+        return result
+    except Exception:
+        LOG.exception("Telegram audio upload failed (bytes=%d, seconds=%.2f, api=%s)",
+                      size, time.monotonic() - started,
+                      "local" if LOCAL_API_MODE else "cloud")
+        raise
 
 
 def handle(update):
