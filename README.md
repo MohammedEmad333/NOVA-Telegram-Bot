@@ -17,7 +17,7 @@ Official Telegram bot: **[@NovaOrbitDLBot](https://t.me/NovaOrbitDLBot)**. This 
 - Non-root NOVA worker and private Local Bot API service on an internal Docker network. Downloads use a persistent disk volume shared with the API service; the API service is not published on a public host port.
 - Unit tests, CI, and no tokens stored in Git.
 
-**Scope:** Direct MP4 from arbitrary sites, MEGA, Witanime, playlists, interactive quality selection and Telegram Local Bot API are **not yet implemented**. The initial bot does **not** expose the whole Android NOVA feature set. Downloads should be limited to content you have permission to save.
+**Scope:** Direct MP4 from arbitrary sites, MEGA, Witanime, playlists and interactive quality selection are **not yet implemented**. The Local Bot API is included for large uploads; it does not expand the list of supported media extractors. The initial bot does **not** expose the whole Android NOVA feature set. Downloads should be limited to content you have permission to save.
 
 ## Setup on Ubuntu (ARM64 supported)
 
