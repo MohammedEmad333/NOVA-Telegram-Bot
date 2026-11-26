@@ -38,6 +38,14 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  downloads-init:
+    image: alpine:3.21
+    restart: "no"
+    user: "0:0"
+    command: ["sh", "-c", "chown 10001:10001 /downloads && chmod 0770 /downloads"]
+    volumes:
+      - nova-downloads:/downloads
+
   nova-bot:
     build: .
     restart: unless-stopped
@@ -50,6 +58,8 @@ services:
     depends_on:
       telegram-bot-api:
         condition: service_healthy
+      downloads-init:
+        condition: service_completed_successfully
     group_add:
       - "10001"
     volumes:
