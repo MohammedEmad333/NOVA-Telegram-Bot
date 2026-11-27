@@ -52,6 +52,20 @@ Local Bot API mode is enabled for this deployment. Telegram's local server suppo
 
 Do not expect hard guarantees from CPU quota alone. Avoid running heavy transcoding concurrently with production database workloads.
 
+## Durable download queue
+
+NOVA stores accepted requests in a SQLite database at `/downloads/.nova-queue.sqlite3`, on the persistent Docker volume shared with the Local Bot API. Requests are inserted before their Telegram update offset is advanced. If the database is temporarily unavailable, that update is not acknowledged and Telegram can redeliver it.
+
+- One worker processes one download/upload at a time, in FIFO order.
+- The default queue admits up to 20 active jobs globally and up to 5 active jobs per user. The currently processing job counts toward both limits.
+- Users can send `/queue` to see their own active requests and current positions.
+- The queue is private to each user's Telegram account; other users' URLs and jobs are not shown.
+- Pending and processing jobs survive container restarts. Jobs marked processing at startup return to pending and are retried.
+- Completed/failed job records are retained for seven days for update de-duplication, then cleaned during startup.
+- The database is created with restrictive file permissions and stores the submitted public source URL and Telegram IDs. Protect the Docker volume and host backups accordingly.
+
+**Delivery semantics:** queue insertion is de-duplicated by Telegram update ID. A hard crash after Telegram accepts an upload but before NOVA records job completion can cause that job to be retried and the file to be sent twice. This is at-least-once recovery, not exactly-once delivery. A permanently failing source is marked failed and does not block later jobs.
+
 ## Local Telegram Bot API setup and migration
 
 The Compose stack uses the Telegram Bot API server through a multi-architecture image (`linux/arm64` and `linux/amd64`). Its HTTP ports are only exposed inside the Compose network; they are not published to the host or internet.
