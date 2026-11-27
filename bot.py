@@ -544,13 +544,16 @@ def download_mega(url, folder):
             return chunk
 
         timeout = httpx.Timeout(connect=20, read=60, write=20, pool=20)
-        with client._http.stream("GET", download_url, timeout=timeout) as response:
+        with client._http.stream(
+            "GET", download_url, headers={"Accept-Encoding": "identity"}, timeout=timeout
+        ) as response:
             response.raise_for_status()
             declared_length = response.headers.get("Content-Length")
             if declared_length and declared_length.isdigit():
                 if int(declared_length) != file_size:
                     raise ValueError("حجم استجابة MEGA لا يطابق بيانات الملف.")
-            iterator = iter(response.iter_bytes(chunk_size=1024 * 1024))
+            # MEGA ciphertext is authenticated; never let HTTPX transparently decompress it.
+            iterator = iter(response.iter_raw(chunk_size=1024 * 1024))
             pending = bytearray()
 
             with output_path.open("wb") as target:
@@ -583,6 +586,10 @@ def download_mega(url, folder):
             actual_mac[2] ^ actual_mac[3],
         )
         if actual_meta_mac != expected_meta_mac:
+            LOG.warning(
+                "MEGA integrity mismatch (bytes=%d, chunks=%d, expected_mac_match=false)",
+                file_size, len(list(get_chunks(file_size)),
+            )
             raise ValueError("فشل التحقق من سلامة ملف MEGA بعد فك التشفير.")
 
         if not output_path.is_file() or output_path.stat().st_size != file_size:
