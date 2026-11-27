@@ -1234,8 +1234,16 @@ def process_media_job(chat_id, url):
     try:
         folder = Path(tempfile.mkdtemp(prefix="nova-", dir=str(WORKDIR)))
         host = (urlsplit(url).hostname or "").lower()
+        is_mega = host in MEGA_HOSTS
         is_soundcloud = host == "soundcloud.com" or host.endswith(".soundcloud.com")
-        if is_soundcloud:
+        if is_mega:
+            source = "mega"
+            LOG.info("Media download started (source=%s)", source)
+            file_path = download_mega(url, folder)
+            log_download_complete(source, file_path, download_started)
+            send_video(chat_id, file_path)
+            safe_send(chat_id, "اكتمل إرسال ملف MEGA ✅")
+        elif is_soundcloud:
             source = "soundcloud"
             LOG.info("Media download started (source=%s)", source)
             file_path = download_audio(url, folder)
