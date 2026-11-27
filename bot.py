@@ -7,7 +7,9 @@ import os
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
+import threading
 import tempfile
 import time
 from pathlib import Path
@@ -31,6 +33,11 @@ MAX_BYTES = MAX_MB * 1024 * 1024
 DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT_SECONDS", "1800"))
 UPLOAD_TIMEOUT = int(os.environ.get("TELEGRAM_UPLOAD_TIMEOUT_SECONDS", "1800"))
 WORKDIR = Path(os.environ.get("WORKDIR", "/downloads"))
+QUEUE_DB_PATH = Path(os.environ.get(
+    "QUEUE_DB_PATH", str(WORKDIR / ".nova-queue.sqlite3")
+))
+MAX_QUEUE_SIZE = int(os.environ.get("MAX_QUEUE_SIZE", "20"))
+MAX_QUEUE_PER_USER = int(os.environ.get("MAX_QUEUE_PER_USER", "5"))
 URL_RE = re.compile(r"https?://[^\s<>]+", re.I)
 SUPPORTED = ("youtube.com", "youtu.be", "youtube-nocookie.com", "soundcloud.com", "x.com", "twitter.com")
 
@@ -54,6 +61,187 @@ def permitted_url(value):
 def extract_url(text):
     match = URL_RE.search(text or "")
     return match.group(0).rstrip(".,!?)\"'") if match else None
+
+
+def queue_connection():
+    connection = sqlite3.connect(str(QUEUE_DB_PATH), timeout=10)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout=10000")
+    return connection
+
+
+def init_queue_db():
+    """Create a private durable queue and recover jobs interrupted by a restart."""
+    QUEUE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    previous_umask = os.umask(0o077)
+    connection = None
+    try:
+        connection = queue_connection()
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS queue_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                update_id INTEGER NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('pending', 'processing', 'completed', 'failed')
+                ),
+                created_at REAL NOT NULL,
+                started_at REAL,
+                finished_at REAL
+            )
+        """)
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS queue_jobs_status_order "
+            "ON queue_jobs(status, id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS queue_jobs_user_status "
+            "ON queue_jobs(user_id, status, id)"
+        )
+        connection.execute(
+            "UPDATE queue_jobs SET status='pending', started_at=NULL "
+            "WHERE status='processing'"
+        )
+        connection.execute(
+            "DELETE FROM queue_jobs WHERE status IN ('completed', 'failed') "
+            "AND finished_at < ?",
+            (time.time() - 7 * 24 * 60 * 60,),
+        )
+        connection.commit()
+    finally:
+        if connection is not None:
+            connection.close()
+        os.umask(previous_umask)
+    try:
+        os.chmod(QUEUE_DB_PATH, 0o600)
+    except OSError:
+        LOG.warning("Could not restrict queue database permissions")
+
+
+def enqueue_job(update_id, user_id, chat_id, url):
+    """Persist a request before acknowledging its Telegram update."""
+    connection = queue_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        existing = connection.execute(
+            "SELECT id, status FROM queue_jobs WHERE update_id=?",
+            (update_id,),
+        ).fetchone()
+        if existing:
+            connection.commit()
+            return {"accepted": False, "duplicate": True,
+                    "job_id": existing["id"], "status": existing["status"]}
+
+        active_total = connection.execute(
+            "SELECT COUNT(*) FROM queue_jobs WHERE status IN ('pending', 'processing')"
+        ).fetchone()[0]
+        if active_total >= MAX_QUEUE_SIZE:
+            connection.commit()
+            return {"accepted": False, "reason": "queue_full"}
+
+        active_user = connection.execute(
+            "SELECT COUNT(*) FROM queue_jobs WHERE user_id=? "
+            "AND status IN ('pending', 'processing')",
+            (user_id,),
+        ).fetchone()[0]
+        if active_user >= MAX_QUEUE_PER_USER:
+            connection.commit()
+            return {"accepted": False, "reason": "user_limit"}
+
+        cursor = connection.execute(
+            "INSERT INTO queue_jobs "
+            "(update_id, user_id, chat_id, url, status, created_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?)",
+            (update_id, user_id, chat_id, url, time.time()),
+        )
+        job_id = cursor.lastrowid
+        processing_count = connection.execute(
+            "SELECT COUNT(*) FROM queue_jobs WHERE status='processing'"
+        ).fetchone()[0]
+        pending_ahead = connection.execute(
+            "SELECT COUNT(*) FROM queue_jobs WHERE status='pending' AND id<=?",
+            (job_id,),
+        ).fetchone()[0]
+        position = processing_count + pending_ahead
+        connection.commit()
+        return {"accepted": True, "job_id": job_id, "position": position}
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def claim_next_job():
+    """Atomically claim the oldest pending job; only the single worker calls this."""
+    connection = queue_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT id, update_id, user_id, chat_id, url FROM queue_jobs "
+            "WHERE status='pending' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if row is None:
+            connection.commit()
+            return None
+        connection.execute(
+            "UPDATE queue_jobs SET status='processing', started_at=? WHERE id=?",
+            (time.time(), row["id"]),
+        )
+        connection.commit()
+        return dict(row)
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def finish_job(job_id, succeeded):
+    connection = queue_connection()
+    try:
+        connection.execute(
+            "UPDATE queue_jobs SET status=?, finished_at=? "
+            "WHERE id=? AND status='processing'",
+            ("completed" if succeeded else "failed", time.time(), job_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def user_queue_snapshot(user_id):
+    """Return a user's active jobs with positions in the global FIFO queue."""
+    connection = queue_connection()
+    try:
+        processing_count = connection.execute(
+            "SELECT COUNT(*) FROM queue_jobs WHERE status='processing'"
+        ).fetchone()[0]
+        rows = connection.execute(
+            "SELECT id, status FROM queue_jobs "
+            "WHERE user_id=? AND status IN ('pending', 'processing') ORDER BY id",
+            (user_id,),
+        ).fetchall()
+        result = []
+        for row in rows:
+            if row["status"] == "processing":
+                position = 1
+            else:
+                pending_ahead = connection.execute(
+                    "SELECT COUNT(*) FROM queue_jobs "
+                    "WHERE status='pending' AND id<=?",
+                    (row["id"],),
+                ).fetchone()[0]
+                position = processing_count + pending_ahead
+            result.append({"job_id": row["id"], "status": row["status"],
+                           "position": position})
+        return result
+    finally:
+        connection.close()
+
+
 
 
 class TelegramApiError(Exception):
@@ -832,31 +1020,9 @@ def send_audio(chat_id, path):
         raise
 
 
-def handle(update):
-    entry = update.get("message") or {}
-    user = entry.get("from") or {}
-    chat = entry.get("chat") or {}
-    if chat.get("type") != "private":
-        return
-    chat_id = chat.get("id")
-    user_id = user.get("id")
-    text = entry.get("text") or ""
-    if not chat_id or not isinstance(user_id, int):
-        return
-    if text.strip().startswith("/id"):
-        safe_send(chat_id, "Telegram user ID: " + str(user_id))
-        return
-    if user_id not in allowed_ids():
-        safe_send(chat_id, "هذا البوت خاص وغير متاح لهذا الحساب.")
-        return
-    if text.strip().startswith(("/start", "/help")):
-        safe_send(chat_id, "NOVA Bot 🎬\nأرسل رابط YouTube أو SoundCloud أو فيديو X عام. حد الملف: " + str(MAX_MB) + " MB. تحميل واحد في كل مرة.")
-        return
-    url = extract_url(text)
-    if not url or not permitted_url(url):
-        safe_send(chat_id, "أرسل رابط HTTPS عامًا من YouTube أو SoundCloud أو X. لا ندعم الروابط الخاصة أو المحمية.")
-        return
-    safe_send(chat_id, "جاري تجهيز الفيديو…")
+def process_media_job(chat_id, url):
+    """Run one persisted media job and clean its temporary files."""
+    safe_send(chat_id, "بدأ تنفيذ طلبك الآن. يتم تنزيل الملف ثم إرساله…")
     folder = Path(tempfile.mkdtemp(prefix="nova-", dir=str(WORKDIR)))
     download_started = time.monotonic()
     source = "unknown"
@@ -896,16 +1062,120 @@ def handle(update):
             log_download_complete(source, file_path, download_started)
             send_video(chat_id, file_path)
             safe_send(chat_id, "اكتمل إرسال الفيديو ✅")
+        return True
     except ValueError as exc:
         LOG.warning("Media download/send stopped (source=%s, seconds=%.2f, reason=%s)",
                     source, time.monotonic() - download_started, type(exc).__name__)
         safe_send(chat_id, str(exc))
-    except (OSError, RuntimeError, json.JSONDecodeError) as exc:
+        return False
+    except Exception as exc:
         LOG.exception("Download/send failure (source=%s, seconds=%.2f): %s",
                       source, time.monotonic() - download_started, type(exc).__name__)
         safe_send(chat_id, "حدث خطأ أثناء التحميل أو الإرسال. جرّب مرة أخرى لاحقًا.")
+        return False
     finally:
         shutil.rmtree(folder, ignore_errors=True)
+
+
+def queue_worker():
+    """Process persisted jobs sequentially; interrupted jobs are retried at startup."""
+    LOG.info("NOVA queue worker started (max_active=%d, per_user=%d)",
+             MAX_QUEUE_SIZE, MAX_QUEUE_PER_USER)
+    while True:
+        try:
+            job = claim_next_job()
+        except sqlite3.Error:
+            LOG.exception("Queue database read/claim failed")
+            time.sleep(2)
+            continue
+        if job is None:
+            time.sleep(1)
+            continue
+
+        LOG.info("Queue job started (job_id=%d, user_id=%d)",
+                 job["id"], job["user_id"])
+        succeeded = process_media_job(job["chat_id"], job["url"])
+        try:
+            finish_job(job["id"], succeeded)
+            LOG.info("Queue job finished (job_id=%d, status=%s)",
+                     job["id"], "completed" if succeeded else "failed")
+        except sqlite3.Error:
+            LOG.exception("Could not persist queue completion (job_id=%d)", job["id"])
+            time.sleep(2)
+
+
+def handle(update):
+    entry = update.get("message") or {}
+    user = entry.get("from") or {}
+    chat = entry.get("chat") or {}
+    if chat.get("type") != "private":
+        return
+    chat_id = chat.get("id")
+    user_id = user.get("id")
+    text = entry.get("text") or ""
+    if not chat_id or not isinstance(user_id, int):
+        return
+
+    command = text.strip().split(maxsplit=1)[0].split("@", 1)[0].lower() if text.strip() else ""
+    if command == "/id":
+        safe_send(chat_id, "Telegram user ID: " + str(user_id))
+        return
+    if user_id not in allowed_ids():
+        safe_send(chat_id, "هذا البوت خاص وغير متاح لهذا الحساب.")
+        return
+    if command in ("/start", "/help"):
+        safe_send(
+            chat_id,
+            "NOVA Bot 🎬\nأرسل رابط YouTube أو SoundCloud أو فيديو X عام. "
+            + "حد الملف: " + str(MAX_MB) + " MB. "
+            + "يعمل NOVA على طلب واحد في كل مرة، ويمكنك متابعة دورك بالأمر /queue.",
+        )
+        return
+    if command == "/queue":
+        jobs = user_queue_snapshot(user_id)
+        if not jobs:
+            safe_send(chat_id, "ليس لديك طلبات نشطة في قائمة الانتظار.")
+            return
+        lines = ["طلباتك النشطة في NOVA:"]
+        for job in jobs:
+            if job["status"] == "processing":
+                lines.append("• طلب قيد التنفيذ الآن.")
+            else:
+                lines.append("• طلب في الانتظار. ترتيبك الحالي: #" + str(job["position"]))
+        safe_send(chat_id, "\n".join(lines))
+        return
+
+    url = extract_url(text)
+    if not url or len(url) > 2048 or not permitted_url(url):
+        safe_send(chat_id, "أرسل رابط HTTPS عامًا وصالحًا من YouTube أو SoundCloud أو X.")
+        return
+    update_id = update.get("update_id")
+    if not isinstance(update_id, int):
+        safe_send(chat_id, "تعذّر تسجيل الطلب. أعد إرسال الرابط.")
+        return
+    try:
+        result = enqueue_job(update_id, user_id, chat_id, url)
+    except sqlite3.Error:
+        LOG.exception("Could not persist incoming media request")
+        safe_send(chat_id, "تعذّر حفظ طلبك في قائمة الانتظار. حاول مرة أخرى بعد قليل.")
+        return
+
+    if result.get("duplicate"):
+        return
+    if not result.get("accepted"):
+        if result.get("reason") == "user_limit":
+            safe_send(chat_id, "لديك بالفعل " + str(MAX_QUEUE_PER_USER)
+                       + " طلبات نشطة. انتظر اكتمال أحدها ثم أرسل طلبًا جديدًا.")
+        else:
+            safe_send(chat_id, "قائمة الانتظار ممتلئة حاليًا. حاول مجددًا بعد اكتمال بعض الطلبات.")
+        return
+
+    position = result["position"]
+    if position == 1:
+        safe_send(chat_id, "تمت إضافة طلبك إلى قائمة NOVA. أنت التالي وسيبدأ التنفيذ قريبًا. لمتابعة دورك أرسل /queue.")
+    else:
+        safe_send(chat_id, "تمت إضافة طلبك إلى قائمة NOVA. ترتيبك الحالي: #"
+                   + str(position) + ". لمتابعة دورك أرسل /queue.")
 
 
 def main():
@@ -917,12 +1187,17 @@ def main():
         raise SystemExit("Invalid TELEGRAM_API_BASE_URL")
     if (not 1 <= MAX_MB <= MAX_SAFE_MB
             or not 30 <= DOWNLOAD_TIMEOUT <= 7200
-            or not 30 <= UPLOAD_TIMEOUT <= 7200):
+            or not 30 <= UPLOAD_TIMEOUT <= 7200
+            or not 1 <= MAX_QUEUE_SIZE <= 200
+            or not 1 <= MAX_QUEUE_PER_USER <= MAX_QUEUE_SIZE):
         raise SystemExit("Invalid resource limits for the configured Telegram API mode")
     WORKDIR.mkdir(parents=True, exist_ok=True)
     if LOCAL_API_MODE:
         os.chmod(WORKDIR, 0o750)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    init_queue_db()
+    worker = threading.Thread(target=queue_worker, name="nova-queue-worker", daemon=True)
+    worker.start()
     LOG.info("NOVA private bot starting, max video size %s MB", MAX_MB)
     offset = None
     errors = 0
@@ -942,7 +1217,7 @@ def main():
             LOG.warning("Telegram polling HTTP %d; next attempt in %d seconds",
                         exc.status, delay)
             time.sleep(delay)
-        except (OSError, RuntimeError, ValueError, URLError) as exc:
+        except (OSError, RuntimeError, ValueError, URLError, sqlite3.Error) as exc:
             errors += 1
             delay = polling_delay(None, errors)
             LOG.warning("Polling network/response failure (%s); next attempt in %d seconds",
