@@ -32,6 +32,27 @@ class SecurityTests(unittest.TestCase):
         for url in bad:
             self.assertFalse(bot.permitted_url(url), url)
 
+    def test_mega_download_url_upgrades_http_cdn_to_https(self):
+        url = "http://gfs123.userstorage.mega.co.nz/file/path?token=abc"
+        self.assertEqual(
+            bot.normalize_mega_download_url(url),
+            "https://gfs123.userstorage.mega.co.nz/file/path?token=abc",
+        )
+
+    def test_mega_download_url_accepts_https_and_rejects_untrusted_hosts(self):
+        self.assertEqual(
+            bot.normalize_mega_download_url("https://gfs.mega.nz/file/path"),
+            "https://gfs.mega.nz/file/path",
+        )
+        for url in (
+            "http://example.com/file",
+            "https://mega.co.nz.evil.test/file",
+            "https://user@mega.co.nz/file",
+            "ftp://gfs.mega.co.nz/file",
+            "https://mega.co.nz:444/file",
+        ):
+            self.assertIsNone(bot.normalize_mega_download_url(url), url)
+
     def test_mega_file_url_parses_complete_modern_link(self):
         url = "https://mega.nz/file/KvwhgIzD#GERsFfnLenwbNrct0ALkJ1Kf38DS4aHSGiKGGU_id1U"
         self.assertEqual(
