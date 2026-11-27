@@ -1158,7 +1158,7 @@ def handle(update):
     except sqlite3.Error:
         LOG.exception("Could not persist incoming media request")
         safe_send(chat_id, "تعذّر حفظ طلبك في قائمة الانتظار. حاول مرة أخرى بعد قليل.")
-        return
+        return False
 
     if result.get("duplicate"):
         return
@@ -1209,8 +1209,11 @@ def main():
             }, timeout=35)
             errors = 0
             for update in updates:
+                # Persist the request before advancing the long-poll offset.
+                # On a transient DB error Telegram will redeliver this update.
+                if handle(update) is False:
+                    break
                 offset = update["update_id"] + 1
-                handle(update)
         except TelegramApiError as exc:
             errors += 1
             delay = polling_delay(exc.status, errors, exc.retry_after)
