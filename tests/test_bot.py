@@ -335,6 +335,95 @@ class SecurityTests(unittest.TestCase):
             self.assertGreater(logger.info.call_args.args[3], 0)
             self.assertGreater(logger.info.call_args.args[4], 0)
 
+    def test_queue_persists_fifo_jobs_and_rejects_duplicates(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(bot, "QUEUE_DB_PATH", Path(directory) / "queue.sqlite3"), \
+             patch.object(bot, "MAX_QUEUE_SIZE", 3), \
+             patch.object(bot, "MAX_QUEUE_PER_USER", 2):
+            bot.init_queue_db()
+            first = bot.enqueue_job(100, 10, 10, "https://x.com/a/status/1234567890")
+            second = bot.enqueue_job(101, 20, 20, "https://x.com/b/status/1234567891")
+            duplicate = bot.enqueue_job(100, 10, 10, "https://x.com/a/status/1234567890")
+            self.assertEqual(first["position"], 1)
+            self.assertEqual(second["position"], 2)
+            self.assertTrue(duplicate["duplicate"])
+            self.assertEqual(bot.claim_next_job()["update_id"], 100)
+            snapshot = bot.user_queue_snapshot(20)
+            self.assertEqual(snapshot[0]["position"], 2)
+            bot.finish_job(first["job_id"], True)
+            self.assertEqual(bot.claim_next_job()["update_id"], 101)
+
+    def test_queue_enforces_global_and_per_user_limits(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(bot, "QUEUE_DB_PATH", Path(directory) / "queue.sqlite3"), \
+             patch.object(bot, "MAX_QUEUE_SIZE", 2), \
+             patch.object(bot, "MAX_QUEUE_PER_USER", 1):
+            bot.init_queue_db()
+            self.assertTrue(bot.enqueue_job(1, 10, 10, "https://x.com/a/status/1234567890")["accepted"])
+            self.assertEqual(bot.enqueue_job(2, 10, 10, "https://x.com/a/status/1234567891")["reason"], "user_limit")
+            self.assertTrue(bot.enqueue_job(3, 20, 20, "https://x.com/b/status/1234567892")["accepted"])
+            self.assertEqual(bot.enqueue_job(4, 30, 30, "https://x.com/c/status/1234567893")["reason"], "queue_full")
+
+    def test_queue_recovers_processing_jobs_after_restart(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(bot, "QUEUE_DB_PATH", Path(directory) / "queue.sqlite3"):
+            bot.init_queue_db()
+            job = bot.enqueue_job(55, 10, 10, "https://x.com/a/status/1234567890")
+            bot.claim_next_job()
+            bot.init_queue_db()
+            connection = bot.queue_connection()
+            try:
+                row = connection.execute(
+                    "SELECT status, started_at FROM queue_jobs WHERE id=?",
+                    (job["job_id"],),
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertEqual(row["status"], "pending")
+            self.assertIsNone(row["started_at"])
+
+    def test_queue_database_is_created_with_private_permissions(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(bot, "QUEUE_DB_PATH", Path(directory) / "queue.sqlite3"):
+            bot.init_queue_db()
+            self.assertEqual(bot.QUEUE_DB_PATH.stat().st_mode & 0o777, 0o600)
+
+    def test_queue_status_command_only_reads_authorized_user_jobs(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(bot, "QUEUE_DB_PATH", Path(directory) / "queue.sqlite3"), \
+             patch.object(bot, "ALLOWED_RAW", "10"), \
+             patch.object(bot, "safe_send") as notify:
+            bot.init_queue_db()
+            bot.enqueue_job(1, 10, 10, "https://x.com/a/status/1234567890")
+            bot.enqueue_job(2, 20, 20, "https://x.com/b/status/1234567891")
+            bot.handle({"update_id": 3, "message": {
+                "from": {"id": 10}, "chat": {"id": 10, "type": "private"},
+                "text": "/queue",
+            }})
+            notify.assert_called_once()
+            self.assertIn("طلباتك النشطة", notify.call_args.args[1])
+            self.assertNotIn("1234567891", notify.call_args.args[1])
+
+    def test_queue_db_failure_does_not_acknowledge_update(self):
+        with patch.object(bot, "ALLOWED_RAW", "10"), \
+             patch.object(bot, "safe_send"), \
+             patch.object(bot, "enqueue_job", side_effect=__import__("sqlite3").OperationalError("busy")):
+            result = bot.handle({"update_id": 9, "message": {
+                "from": {"id": 10}, "chat": {"id": 10, "type": "private"},
+                "text": "https://x.com/a/status/1234567890",
+            }})
+        self.assertIs(result, False)
+
     def test_parse_message(self):
         self.assertEqual(bot.extract_url("Hi https://youtu.be/123."), "https://youtu.be/123")
         self.assertIsNone(bot.extract_url("nothing"))

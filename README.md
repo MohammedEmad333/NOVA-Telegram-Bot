@@ -48,9 +48,23 @@ Stop the bot with `docker compose down`. Updates: `git pull --ff-only && docker 
 
 ## Resource policy
 
-Local Bot API mode is enabled for this deployment. Telegram's local server supports uploads up to 2000 MB; NOVA deliberately starts at 1 GiB (1024 MiB). `MAX_VIDEO_MB` can be raised up to 1800 MiB in the bot configuration, subject to available disk space, Telegram's limit and end-to-end testing. `/downloads` is a persistent Docker volume on the host disk, shared with the Local Bot API process for `file://` uploads; it is no longer a RAM-backed tmpfs. The API server's own state is stored in a separate persistent volume. The bot and API containers have bounded CPU/RAM and only one task runs at a time. Check free disk space before increasing the cap. The initial bot only supports private chats and ignores group messages. A single task runs synchronously; new messages wait for the current task, with no durable queue. Requests interrupted by process restart are not resumed.
+Local Bot API mode is enabled for this deployment. Telegram's local server supports uploads up to 2000 MB; NOVA deliberately starts at 1 GiB (1024 MiB). `MAX_VIDEO_MB` can be raised up to 1800 MiB in the bot configuration, subject to available disk space, Telegram's limit and end-to-end testing. `/downloads` is a persistent Docker volume on the host disk, shared with the Local Bot API process for `file://` uploads; it is no longer a RAM-backed tmpfs. The API server's own state is stored in a separate persistent volume. The bot and API containers have bounded CPU/RAM and only one task runs at a time. Check free disk space before increasing the cap. The initial bot only supports private chats and ignores group messages. A dedicated worker processes one queued task at a time. Accepted requests are stored durably and interrupted jobs are retried after restart; see the Durable download queue section.
 
 Do not expect hard guarantees from CPU quota alone. Avoid running heavy transcoding concurrently with production database workloads.
+
+## Durable download queue
+
+NOVA stores accepted requests in a SQLite database at `/downloads/.nova-queue.sqlite3`, on the persistent Docker volume shared with the Local Bot API. Requests are inserted before their Telegram update offset is advanced. If the database is temporarily unavailable, that update is not acknowledged and Telegram can redeliver it.
+
+- One worker processes one download/upload at a time, in FIFO order.
+- The default queue admits up to 20 active jobs globally and up to 5 active jobs per user. The currently processing job counts toward both limits.
+- Users can send `/queue` to see their own active requests and current positions.
+- The queue is private to each user's Telegram account; other users' URLs and jobs are not shown.
+- Pending and processing jobs survive container restarts. Jobs marked processing at startup return to pending and are retried.
+- Completed/failed job records are retained for seven days for update de-duplication, then cleaned during startup.
+- The database is created with restrictive file permissions and stores the submitted public source URL and Telegram IDs. Protect the Docker volume and host backups accordingly.
+
+**Delivery semantics:** queue insertion is de-duplicated by Telegram update ID. A hard crash after Telegram accepts an upload but before NOVA records job completion can cause that job to be retried and the file to be sent twice. This is at-least-once recovery, not exactly-once delivery. A permanently failing source is marked failed and does not block later jobs.
 
 ## Local Telegram Bot API setup and migration
 
