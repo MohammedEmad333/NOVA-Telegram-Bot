@@ -40,10 +40,44 @@ MAX_QUEUE_SIZE = int(os.environ.get("MAX_QUEUE_SIZE", "20"))
 MAX_QUEUE_PER_USER = int(os.environ.get("MAX_QUEUE_PER_USER", "5"))
 URL_RE = re.compile(r"https?://[^\s<>]+", re.I)
 SUPPORTED = ("youtube.com", "youtu.be", "youtube-nocookie.com", "soundcloud.com", "x.com", "twitter.com")
+MEGA_HOSTS = {"mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz"}
 
 
 def allowed_ids():
     return {int(item.strip()) for item in ALLOWED_RAW.split(",") if item.strip().isdigit()}
+
+
+def parse_mega_file_url(value):
+    """Parse a public MEGA file link while preserving its fragment decryption key."""
+    try:
+        parsed = urlsplit(value)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if (parsed.scheme != "https" or host not in MEGA_HOSTS
+                or parsed.username is not None or parsed.password is not None
+                or parsed.port not in (None, 443)):
+            return None
+
+        if parsed.path.startswith("/file/"):
+            parts = [part for part in parsed.path.split("/") if part]
+            if len(parts) != 2:
+                return None
+            file_id, file_key = parts[1], parsed.fragment
+        else:
+            fragment = parsed.fragment
+            if fragment.startswith("!"):
+                fragment = fragment[1:]
+            parts = fragment.split("!")
+            if len(parts) != 2:
+                return None
+            file_id, file_key = parts
+
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8}", file_id):
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", file_key):
+            return None
+        return file_id, file_key
+    except (ValueError, TypeError):
+        return None
 
 
 def permitted_url(value):
@@ -51,9 +85,15 @@ def permitted_url(value):
     try:
         p = urlsplit(value)
         host = (p.hostname or "").lower().rstrip(".")
-        return (p.scheme == "https" and p.username is None and p.password is None
-                and p.port in (None, 443) and bool(host)
-                and any(host == domain or host.endswith("." + domain) for domain in SUPPORTED))
+        valid_origin = (
+            p.scheme == "https" and p.username is None and p.password is None
+            and p.port in (None, 443) and bool(host)
+        )
+        if not valid_origin:
+            return False
+        if host in MEGA_HOSTS:
+            return parse_mega_file_url(value) is not None
+        return any(host == domain or host.endswith("." + domain) for domain in SUPPORTED)
     except ValueError:
         return False
 
@@ -393,6 +433,166 @@ def parse_newpipe_result(stdout, returncode):
     if returncode and metadata.get("ok"):
         raise ValueError("inconsistent_extractor_exit")
     return metadata
+
+def download_mega(url, folder):
+    """Stream and decrypt one public MEGA file link without buffering it in RAM."""
+    parsed = parse_mega_file_url(url)
+    if parsed is None:
+        raise ValueError("رابط MEGA غير صالح أو لا يحتوي مفتاح فك التشفير.")
+
+    file_id, encoded_key = parsed
+    output_path = None
+    client = None
+    try:
+        from mega import Mega
+        from mega.crypto import (
+            a32_to_str, base64_to_a32, base64_url_decode,
+            decrypt_attr, get_chunks, str_to_a32,
+        )
+        from Crypto.Cipher import AES
+        from Crypto.Util import Counter
+        import httpx
+
+        client = Mega()
+        file_data = client._api_request({"a": "g", "g": 1, "p": file_id})
+        if not isinstance(file_data, dict) or not all(
+            key in file_data for key in ("g", "s", "at")
+        ):
+            raise ValueError("ملف MEGA غير متاح، أو أن الرابط منتهي أو محذوف.")
+
+        raw_size = file_data.get("s")
+        if isinstance(raw_size, bool):
+            raise ValueError("تعذّر قراءة حجم ملف MEGA.")
+        try:
+            file_size = int(raw_size)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("تعذّر قراءة حجم ملف MEGA.") from None
+        if file_size <= 0:
+            raise ValueError("ملف MEGA فارغ أو غير صالح.")
+        if file_size > MAX_BYTES:
+            raise ValueError(f"حجم ملف MEGA يتجاوز حد NOVA البالغ {MAX_MB} MB.")
+
+        key_words = base64_to_a32(encoded_key)
+        if len(key_words) != 8:
+            raise ValueError("مفتاح فك تشفير ملف MEGA غير صالح.")
+        file_key = tuple(key_words)
+        key = (
+            file_key[0] ^ file_key[4],
+            file_key[1] ^ file_key[5],
+            file_key[2] ^ file_key[6],
+            file_key[3] ^ file_key[7],
+        )
+        iv = file_key[4:6] + (0, 0)
+        expected_meta_mac = file_key[6:8]
+
+        attributes = decrypt_attr(base64_url_decode(file_data["at"]), key)
+        if not isinstance(attributes, dict):
+            raise ValueError("تعذّر فك تشفير بيانات الملف من MEGA.")
+        filename = str(attributes.get("n") or "mega-file.bin")
+        filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
+        filename = "".join(
+            char for char in filename
+            if char not in "/\\:" and ord(char) >= 32 and ord(char) != 127
+        ).strip(" .")
+        if not filename or filename in (".", ".."):
+            filename = "mega-file.bin"
+        filename = filename[:180]
+        output_path = folder / filename
+
+        download_url = file_data["g"]
+        download_host = (urlsplit(download_url).hostname or "").lower().rstrip(".")
+        if (urlsplit(download_url).scheme != "https"
+                or not (download_host.endswith(".mega.co.nz")
+                        or download_host == "mega.co.nz"
+                        or download_host.endswith(".mega.nz")
+                        or download_host == "mega.nz")):
+            raise ValueError("أعاد MEGA عنوان تنزيل غير صالح.")
+
+        key_bytes = a32_to_str(key)
+        ctr_value = (iv[0] << 32) + (iv[1] << 64)
+        ctr = Counter.new(128, initial_value=ctr_value)
+        aes_ctr = AES.new(key_bytes, AES.MODE_CTR, counter=ctr)
+
+        mac_value = b"\x00" * 16
+        mac_encryptor = AES.new(key_bytes, AES.MODE_CBC, mac_value)
+        mac_iv = a32_to_str([iv[0], iv[1], iv[0], iv[1]])
+        downloaded = 0
+        started = time.monotonic()
+
+        def read_exact(iterator, pending, expected):
+            while len(pending) < expected:
+                try:
+                    pending.extend(next(iterator))
+                except StopIteration:
+                    raise ValueError("انقطع تنزيل ملف MEGA قبل اكتماله.") from None
+            chunk = bytes(pending[:expected])
+            del pending[:expected]
+            return chunk
+
+        timeout = httpx.Timeout(connect=20, read=60, write=20, pool=20)
+        with client._http.stream("GET", download_url, timeout=timeout) as response:
+            response.raise_for_status()
+            declared_length = response.headers.get("Content-Length")
+            if declared_length and declared_length.isdigit():
+                if int(declared_length) != file_size:
+                    raise ValueError("حجم استجابة MEGA لا يطابق بيانات الملف.")
+            iterator = iter(response.iter_bytes(chunk_size=1024 * 1024))
+            pending = bytearray()
+
+            with output_path.open("wb") as target:
+                for _, chunk_size in get_chunks(file_size):
+                    if time.monotonic() - started > DOWNLOAD_TIMEOUT:
+                        raise ValueError("انتهت مهلة تنزيل ملف MEGA.")
+                    encrypted_chunk = read_exact(iterator, pending, chunk_size)
+                    plain_chunk = aes_ctr.decrypt(encrypted_chunk)
+                    target.write(plain_chunk)
+                    downloaded += len(plain_chunk)
+
+                    # MEGA authenticates each protocol chunk with a CBC-MAC.
+                    cbc = AES.new(key_bytes, AES.MODE_CBC, mac_iv)
+                    last_start = ((len(plain_chunk) - 1) // 16) * 16
+                    for block_start in range(0, last_start, 16):
+                        cbc.encrypt(plain_chunk[block_start:block_start + 16])
+                    last_block = plain_chunk[last_start:]
+                    if len(last_block) % 16:
+                        last_block += b"\x00" * (16 - len(last_block) % 16)
+                    mac_value = mac_encryptor.encrypt(cbc.encrypt(last_block))
+
+                if downloaded != file_size or pending:
+                    raise ValueError("حجم ملف MEGA الذي تم تنزيله غير مكتمل.")
+                if next(iterator, b""):
+                    raise ValueError("استجابة MEGA تجاوزت الحجم المعلن للملف.")
+
+        actual_mac = str_to_a32(mac_value)
+        actual_meta_mac = (
+            actual_mac[0] ^ actual_mac[1],
+            actual_mac[2] ^ actual_mac[3],
+        )
+        if actual_meta_mac != expected_meta_mac:
+            raise ValueError("فشل التحقق من سلامة ملف MEGA بعد فك التشفير.")
+
+        if not output_path.is_file() or output_path.stat().st_size != file_size:
+            raise ValueError("الملف الناتج من MEGA غير مكتمل.")
+        LOG.info("MEGA file download ready (bytes=%d)", file_size)
+        return output_path
+    except ValueError:
+        if output_path is not None:
+            output_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        if output_path is not None:
+            output_path.unlink(missing_ok=True)
+        LOG.warning("MEGA download failed (error_type=%s)", type(exc).__name__)
+        raise ValueError(
+            "تعذّر تنزيل ملف MEGA. قد يكون الرابط غير متاح أو أن MEGA فرض حدًا مؤقتًا."
+        ) from None
+    finally:
+        if client is not None:
+            try:
+                client._http.close()
+            except Exception:
+                pass
+
 
 def download_youtube(url, folder):
     """Resolve YouTube streams with the same NewPipeExtractor version used by NOVA Android."""
