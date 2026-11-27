@@ -207,6 +207,11 @@ def finish_job(job_id, succeeded):
             "WHERE id=? AND status='processing'",
             ("completed" if succeeded else "failed", time.time(), job_id),
         )
+        connection.execute(
+            "DELETE FROM queue_jobs WHERE status IN ('completed', 'failed') "
+            "AND finished_at < ?",
+            (time.time() - 7 * 24 * 60 * 60,),
+        )
         connection.commit()
     finally:
         connection.close()
@@ -1023,10 +1028,11 @@ def send_audio(chat_id, path):
 def process_media_job(chat_id, url):
     """Run one persisted media job and clean its temporary files."""
     safe_send(chat_id, "بدأ تنفيذ طلبك الآن. يتم تنزيل الملف ثم إرساله…")
-    folder = Path(tempfile.mkdtemp(prefix="nova-", dir=str(WORKDIR)))
+    folder = None
     download_started = time.monotonic()
     source = "unknown"
     try:
+        folder = Path(tempfile.mkdtemp(prefix="nova-", dir=str(WORKDIR)))
         host = (urlsplit(url).hostname or "").lower()
         is_soundcloud = host == "soundcloud.com" or host.endswith(".soundcloud.com")
         if is_soundcloud:
@@ -1074,7 +1080,8 @@ def process_media_job(chat_id, url):
         safe_send(chat_id, "حدث خطأ أثناء التحميل أو الإرسال. جرّب مرة أخرى لاحقًا.")
         return False
     finally:
-        shutil.rmtree(folder, ignore_errors=True)
+        if folder is not None:
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 def queue_worker():
@@ -1095,13 +1102,15 @@ def queue_worker():
         LOG.info("Queue job started (job_id=%d, user_id=%d)",
                  job["id"], job["user_id"])
         succeeded = process_media_job(job["chat_id"], job["url"])
-        try:
-            finish_job(job["id"], succeeded)
-            LOG.info("Queue job finished (job_id=%d, status=%s)",
-                     job["id"], "completed" if succeeded else "failed")
-        except sqlite3.Error:
-            LOG.exception("Could not persist queue completion (job_id=%d)", job["id"])
-            time.sleep(2)
+        while True:
+            try:
+                finish_job(job["id"], succeeded)
+                LOG.info("Queue job finished (job_id=%d, status=%s)",
+                         job["id"], "completed" if succeeded else "failed")
+                break
+            except sqlite3.Error:
+                LOG.exception("Could not persist queue completion (job_id=%d)", job["id"])
+                time.sleep(2)
 
 
 def handle(update):
