@@ -434,6 +434,25 @@ def parse_newpipe_result(stdout, returncode):
         raise ValueError("inconsistent_extractor_exit")
     return metadata
 
+def normalize_mega_download_url(value):
+    """Accept only MEGA CDN hosts and force HTTPS for the returned file URL."""
+    try:
+        parsed = urlsplit(value)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        allowed_host = (
+            host == "mega.co.nz" or host.endswith(".mega.co.nz")
+            or host == "mega.nz" or host.endswith(".mega.nz")
+        )
+        if (parsed.scheme not in ("http", "https") or not allowed_host
+                or parsed.username is not None or parsed.password is not None
+                or parsed.port not in (None, 80, 443)
+                or not parsed.path.startswith("/")):
+            return None
+        return parsed._replace(scheme="https", netloc=host).geturl()
+    except (TypeError, ValueError):
+        return None
+
+
 def download_mega(url, folder):
     """Stream and decrypt one public MEGA file link without buffering it in RAM."""
     parsed = parse_mega_file_url(url)
@@ -499,13 +518,8 @@ def download_mega(url, folder):
         filename = filename[:180]
         output_path = folder / filename
 
-        download_url = file_data["g"]
-        download_host = (urlsplit(download_url).hostname or "").lower().rstrip(".")
-        if (urlsplit(download_url).scheme != "https"
-                or not (download_host.endswith(".mega.co.nz")
-                        or download_host == "mega.co.nz"
-                        or download_host.endswith(".mega.nz")
-                        or download_host == "mega.nz")):
+        download_url = normalize_mega_download_url(file_data.get("g"))
+        if download_url is None:
             raise ValueError("أعاد MEGA عنوان تنزيل غير صالح.")
 
         key_bytes = a32_to_str(key)
