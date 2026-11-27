@@ -9,6 +9,7 @@ Official Telegram bot: **[@NovaOrbitDLBot](https://t.me/NovaOrbitDLBot)**. This 
 - Telegram long polling. No incoming ports, public domain or webhook needed.
 - Private access based on Telegram numeric user IDs. Unapproved users cannot download.
 - YouTube extraction through the same NewPipeExtractor v0.26.5 library used by NOVADownloader Android; SoundCloud uses `yt-dlp`.
+- Public MEGA file links (`mega.nz/file/...#KEY`) are supported without a MEGA account: NOVA reads the full link, streams and decrypts the file to disk, verifies MEGA's file MAC, then sends it through the Local Bot API. Folder links and account-only/private files are not supported.
 - Ordinary public X posts use the same FxTwitter/vxTwitter public metadata fallback as the NOVA Android app, validating `video.twimg.com` MP4/HLS URLs before download. X Broadcast replays use a separate bounded HLS path.
 - Ended X Broadcast replays use a dedicated HLS path, prefer up to 480p, enforce the 45 MiB temporary/final output ceiling, and upload as MP4 documents. Ordinary X posts continue through the standard extractor.
 - YouTube selects a compatible MP4 stream at or below 720p, preferring separate video + M4A audio and merging with FFmpeg without re-encoding. A progressive MP4 fallback is used when needed.
@@ -17,7 +18,7 @@ Official Telegram bot: **[@NovaOrbitDLBot](https://t.me/NovaOrbitDLBot)**. This 
 - Non-root NOVA worker and private Local Bot API service on an internal Docker network. Downloads use a persistent disk volume shared with the API service; the API service is not published on a public host port.
 - Unit tests, CI, and no tokens stored in Git.
 
-**Scope:** Direct MP4 from arbitrary sites, MEGA, Witanime, playlists and interactive quality selection are **not yet implemented**. The Local Bot API is included for large uploads; it does not expand the list of supported media extractors. The initial bot does **not** expose the whole Android NOVA feature set. Downloads should be limited to content you have permission to save.
+**Scope:** Direct MP4 from arbitrary sites, MEGA folder links, Witanime, playlists and interactive quality selection are **not yet implemented**. The Local Bot API is included for large uploads; it does not expand the list of supported media extractors. The initial bot does **not** expose the whole Android NOVA feature set. Downloads should be limited to content you have permission to save.
 
 ## Setup on Ubuntu (ARM64 supported)
 
@@ -51,6 +52,12 @@ Stop the bot with `docker compose down`. Updates: `git pull --ff-only && docker 
 Local Bot API mode is enabled for this deployment. Telegram's local server supports uploads up to 2000 MB; NOVA deliberately starts at 1 GiB (1024 MiB). `MAX_VIDEO_MB` can be raised up to 1800 MiB in the bot configuration, subject to available disk space, Telegram's limit and end-to-end testing. `/downloads` is a persistent Docker volume on the host disk, shared with the Local Bot API process for `file://` uploads; it is no longer a RAM-backed tmpfs. The API server's own state is stored in a separate persistent volume. The bot and API containers have bounded CPU/RAM and only one task runs at a time. Check free disk space before increasing the cap. The initial bot only supports private chats and ignores group messages. A dedicated worker processes one queued task at a time. Accepted requests are stored durably and interrupted jobs are retried after restart; see the Durable download queue section.
 
 Do not expect hard guarantees from CPU quota alone. Avoid running heavy transcoding concurrently with production database workloads.
+
+## MEGA public file links
+
+NOVA accepts complete public MEGA file links in the modern `https://mega.nz/file/FILE_ID#FILE_KEY` form (and legacy single-file links). The fragment after `#` is the file decryption key, so users must send the entire link. NOVA does not ask for MEGA account credentials, cookies or passwords. Public folder links, private account files and links without a valid key are unsupported.
+
+The MEGA engine streams encrypted bytes to disk, decrypts them in bounded chunks, checks the final MEGA MAC and exact file size, then passes the verified file to the existing Telegram document-upload path. The MEGA key is not written to application logs, but the complete submitted URL is stored in the private durable queue database until its record is purged. Treat MEGA links as secrets, restrict access to trusted Telegram user IDs, and do not share queue database backups publicly. Downloads are subject to MEGA availability, transfer limits and the existing NOVA 1 GiB cap. Only download files you own or have permission to save.
 
 ## Durable download queue
 

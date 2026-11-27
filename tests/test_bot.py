@@ -10,6 +10,7 @@ class SecurityTests(unittest.TestCase):
             "https://youtu.be/abc",
             "https://m.soundcloud.com/user/track",
             "https://x.com/test/status/123",
+            "https://mega.nz/file/KvwhgIzD#GERsFfnLenwbNrct0ALkJ1Kf38DS4aHSGiKGGU_id1U",
         ]
         bad = [
             "http://youtube.com/watch?v=1",
@@ -21,11 +22,53 @@ class SecurityTests(unittest.TestCase):
             "file:///etc/passwd",
             "https://user:pass@youtube.com/a",
             "https://youtube.com:444/a",
+            "https://mega.nz/file/KvwhgIzD",
+            "https://mega.nz/file/KvwhgIzD#short",
+            "https://mega.nz.evil.test/file/KvwhgIzD#GERsFfnLenwbNrct0ALkJ1Kf38DS4aHSGiKGGU_id1U",
+            "http://mega.nz/file/KvwhgIzD#GERsFfnLenwbNrct0ALkJ1Kf38DS4aHSGiKGGU_id1U",
         ]
         for url in good:
             self.assertTrue(bot.permitted_url(url), url)
         for url in bad:
             self.assertFalse(bot.permitted_url(url), url)
+
+    def test_mega_file_url_parses_complete_modern_link(self):
+        url = "https://mega.nz/file/KvwhgIzD#GERsFfnLenwbNrct0ALkJ1Kf38DS4aHSGiKGGU_id1U"
+        self.assertEqual(
+            bot.parse_mega_file_url(url),
+            ("KvwhgIzD", "GERsFfnLenwbNrct0ALkJ1Kf38DS4aHSGiKGGU_id1U"),
+        )
+
+    def test_mega_file_url_rejects_missing_or_malformed_keys(self):
+        bad_urls = [
+            "https://mega.nz/file/KvwhgIzD",
+            "https://mega.nz/file/KvwhgIzD#short",
+            "https://mega.nz/folder/KvwhgIzD#GERsFfnLenwbNrct0ALkJ1Kf38DS4aHSGiKGGU_id1U",
+            "https://mega.nz/file/../../#GERsFfnLenwbNrct0ALkJ1Kf38DS4aHSGiKGGU_id1U",
+        ]
+        for url in bad_urls:
+            self.assertIsNone(bot.parse_mega_file_url(url), url)
+
+    def test_mega_legacy_link_is_parsed(self):
+        key = "GERsFfnLenwbNrct0ALkJ1Kf38DS4aHSGiKGGU_id1U"
+        self.assertEqual(
+            bot.parse_mega_file_url("https://mega.nz/#!KvwhgIzD!" + key),
+            ("KvwhgIzD", key),
+        )
+
+    def test_mega_link_is_queued_and_processed_by_mega_engine(self):
+        with patch.object(bot, "ALLOWED_RAW", "10"), \
+             patch.object(bot, "enqueue_job", return_value={
+                 "accepted": True, "position": 1, "job_id": 1
+             }) as enqueue, \
+             patch.object(bot, "safe_send"):
+            result = bot.handle({"update_id": 55, "message": {
+                "from": {"id": 10}, "chat": {"id": 10, "type": "private"},
+                "text": "https://mega.nz/file/KvwhgIzD#GERsFfnLenwbNrct0ALkJ1Kf38DS4aHSGiKGGU_id1U",
+            }})
+        self.assertIsNone(result)
+        self.assertEqual(enqueue.call_args.args[0:3], (55, 10, 10))
+        self.assertIn("mega.nz/file/", enqueue.call_args.args[3])
 
     def test_ytdlp_error_classification_is_safe_and_actionable(self):
         cases = [
