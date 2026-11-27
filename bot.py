@@ -588,7 +588,7 @@ def download_mega(url, folder):
         if actual_meta_mac != expected_meta_mac:
             LOG.warning(
                 "MEGA integrity mismatch (bytes=%d, chunks=%d, expected_mac_match=false)",
-                file_size, len(list(get_chunks(file_size)),
+                file_size, len(list(get_chunks(file_size))),
             )
             raise ValueError("فشل التحقق من سلامة ملف MEGA بعد فك التشفير.")
 
