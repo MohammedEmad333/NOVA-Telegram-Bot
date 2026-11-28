@@ -32,6 +32,15 @@ class SecurityTests(unittest.TestCase):
         for url in bad:
             self.assertFalse(bot.permitted_url(url), url)
 
+    def test_mega_ctr_counter_places_iv_words_in_high_64_bits(self):
+        iv = (0x11223344, 0x55667788, 0, 0)
+        expected = 0x11223344556677880000000000000000
+        self.assertEqual(bot.mega_ctr_initial_value(iv), expected)
+
+    def test_mega_ctr_counter_rejects_short_iv(self):
+        with self.assertRaises(ValueError):
+            bot.mega_ctr_initial_value((1,))
+
     def test_mega_download_url_upgrades_http_cdn_to_https(self):
         url = "http://gfs123.userstorage.mega.co.nz/file/path?token=abc"
         self.assertEqual(

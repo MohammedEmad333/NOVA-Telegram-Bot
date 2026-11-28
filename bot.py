@@ -453,6 +453,13 @@ def normalize_mega_download_url(value):
         return None
 
 
+def mega_ctr_initial_value(iv):
+    """Match MEGA's 128-bit CTR layout: the two IV words occupy the high 64 bits."""
+    if len(iv) < 2:
+        raise ValueError("مفتاح MEGA غير صالح.")
+    return ((int(iv[0]) << 32) + int(iv[1])) << 64
+
+
 def download_mega(url, folder):
     """Stream and decrypt one public MEGA file link without buffering it in RAM."""
     parsed = parse_mega_file_url(url)
@@ -523,7 +530,7 @@ def download_mega(url, folder):
             raise ValueError("أعاد MEGA عنوان تنزيل غير صالح.")
 
         key_bytes = a32_to_str(key)
-        ctr_value = (iv[0] << 32) + (iv[1] << 64)
+        ctr_value = mega_ctr_initial_value(iv)
         ctr = Counter.new(128, initial_value=ctr_value)
         aes_ctr = AES.new(key_bytes, AES.MODE_CTR, counter=ctr)
 
